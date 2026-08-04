@@ -54,7 +54,12 @@ def get_git_branch(project_dir):
     # Detached HEAD has no branch name.
     if branch == 'HEAD':
         return 'detached'
-    return branch
+    # CROSSPOINT_VERSION is compared as SemVer by the OTA updater. Branch names
+    # commonly contain '/', which is not valid in a SemVer prerelease.
+    return ''.join(
+        c if c.isascii() and (c.isalnum() or c == '-') else '-'
+        for c in branch
+    )
 
 
 def get_git_short_sha(project_dir):

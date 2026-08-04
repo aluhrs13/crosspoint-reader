@@ -2,13 +2,13 @@
 
 This page defines the expected local workflow before opening a pull request.
 
-## 1) Fork and create a focused branch
+## 1) Create a focused branch
 
-- Fork the repository to your own GitHub account
-- Clone your fork locally and add the upstream repository if needed
+- Clone this fork and configure the canonical repository as `upstream`; see
+  [Syncing the Intentional Fork](./upstream-sync.md)
 - Enable repo hooks once per clone: `git config core.hooksPath .githooks && chmod +x .githooks/pre-commit`
 
-- Branch from `master`
+- Branch from `develop`
 - Keep each PR focused on one fix or feature area
 
 ## 2) Implement with scope in mind
