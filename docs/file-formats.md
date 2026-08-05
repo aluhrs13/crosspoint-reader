@@ -339,3 +339,209 @@ if (parsedSize != fileSize) {
     std::warning(std::format("Unparsed data detected: {} bytes remaining at offset 0x{:X}", fileSize - parsedSize, parsedSize));
 }
 ```
+
+## Readwise cache
+
+The formats below live under `/.crosspoint/readwise/` and back the Readwise
+Reader integration. They are independent of the EPUB cache above and share none
+of its version numbers.
+
+Unlike the EPUB formats, these do **not** use `Serialization.h`. Multi-byte
+integers are read and written byte-wise little-endian by
+`lib/Readwise/ReadwiseCodec.cpp`, so the encoding is independent of host
+endianness and never performs an unaligned multi-byte load — which RISC-V
+faults on. That also keeps the whole format layer host-compilable, so it is
+unit-tested on the build machine rather than only on device.
+
+Strings inside a document record are `u16` length-prefixed UTF-8 with no
+terminator. Fixed-width string fields elsewhere are NUL-padded to their full
+capacity.
+
+Every field capacity is a deliberate truncation point sized from the maxima
+observed across 200 real documents; see `docs/readwise-api-contract.md`. Two
+truncate in practice: `title` was observed to 318 bytes against a 128-byte
+capacity, and `summary` to 2093 bytes against 256.
+
+### `docs.bin` — Version 1
+
+Per-document metadata plus an offset lookup table. Records are written in one
+forward pass and the LUT last, the same shape as `book.bin`; the header is
+patched with the real LUT offset immediately before the file is renamed into
+place, so a crash mid-write leaves the previous `docs.bin` untouched.
+
+Reading one document is two seeks — LUT entry, then record — so a visible page
+of the library never loads the rest of the file.
+
+`location` and `category` are persisted **by index**. New values must be
+appended immediately before the `Unknown` sentinel (255); renumbering silently
+misreads existing caches. `Unknown` exists because the API's location set is
+open: `shortlist` occurs on real documents but is absent from Readwise's
+published documentation.
+
+`flags` bit 0 is `seen`; bit 1 records that a plain-text body has been cached at
+`bodies/<id>.txt`. Bit 1 is local-only state the server never reports, so it is
+carried across a sync rather than taken from the incoming record.
+
+`readingProgressPercent` is 0–100, narrowed from the API's 0–1 fraction. It is
+read-only: `PATCH /update/` accepts `reading_progress`, answers `200`, and
+silently discards it, so this value is never pushed back.
+
+ImHex pattern:
+
+```c++
+import std.mem;
+import std.string;
+import std.core;
+
+#define EXPECTED_VERSION 1
+
+struct RwString {
+    u16 length;
+    char value[length];
+};
+
+struct RwDocument {
+    RwString id;
+    RwString title;
+    RwString author;
+    RwString siteName;
+    RwString summary;
+    RwString sourceUrl;
+    RwString updatedAt;
+    RwString lastMovedAt;
+    u32 wordCount;
+    u8  location;   // 0 new, 1 later, 2 shortlist, 3 archive, 4 feed, 255 unknown
+    u8  category;   // 0 article, 1 rss, 2 email, 3 tweet, 4 pdf, 5 video, 6 highlight, 7 note, 8 epub, 255 unknown
+    u8  readingProgressPercent;
+    u8  flags;      // bit0 seen, bit1 hasBody
+};
+
+struct DocsBin {
+    u8  version;
+    u32 lutOffset;
+    u16 recordCount;
+
+    if (version != EXPECTED_VERSION) {
+        std::error(std::format("Unexpected docs.bin version {} (expected {})", version, EXPECTED_VERSION));
+    }
+
+    RwDocument records[recordCount];
+
+    if ($ != lutOffset) {
+        std::warning(std::format("LUT offset mismatch: header says 0x{:X}, records end at 0x{:X}", lutOffset, $));
+    }
+    u32 lut[recordCount];
+};
+
+DocsBin docs @ 0x00;
+
+u32 fileSize = std::mem::size();
+u32 parsedSize = $;
+if (parsedSize != fileSize) {
+    std::warning(std::format("Unparsed data detected: {} bytes remaining at offset 0x{:X}", fileSize - parsedSize, parsedSize));
+}
+```
+
+### `index_<location>.bin` — Version 1
+
+One file per synced location, currently `index_new.bin` and `index_later.bin`.
+Each holds record indexes into `docs.bin`, ordered by `lastMovedAt` descending.
+ISO 8601 sorts correctly as a string, so the ordering needs no date parsing.
+
+A visible page of N entries costs `2 * N` bytes plus N record seeks; nothing
+outside the page is read. `feed` is deliberately never indexed — it is an RSS
+firehose and is the one location large enough to hit the API's 10,000 `count`
+cap on its own.
+
+```c++
+#define EXPECTED_VERSION 1
+
+struct IndexBin {
+    u8  version;
+    u16 count;
+    if (version != EXPECTED_VERSION) {
+        std::error(std::format("Unexpected index version {} (expected {})", version, EXPECTED_VERSION));
+    }
+    u16 recordIndex[count];
+};
+
+IndexBin index @ 0x00;
+```
+
+### `journal.bin` — Version 1
+
+The pending-action queue. Entries are **fixed width**, which is the
+append-safety mechanism: a load reads `floor((size - 1) / 66)` entries and
+discards a trailing partial record, so an interrupted append costs only the
+record being written and never corrupts the operations before it.
+
+`op` is persisted by index and is limited to the two operations the API
+demonstrably honours — `0` = set location, `1` = set seen. Reading progress is
+never queued, because the update endpoint discards it.
+
+`remoteRev` is the document's `updated_at` when the operation was queued. If it
+differs from the incoming value at merge time the document also changed
+remotely; the queued local value still wins for its own field, since it
+represents a deliberate user action that has not yet been pushed.
+
+```c++
+#define EXPECTED_VERSION 1
+
+struct JournalEntry {
+    u32  seq;
+    char id[27];         // NUL-padded
+    u8   op;             // 0 setLocation, 1 setSeen
+    u8   payload;        // location value, or 0/1 for seen
+    char remoteRev[33];  // NUL-padded ISO 8601
+};
+
+struct JournalBin {
+    u8 version;
+    if (version != EXPECTED_VERSION) {
+        std::error(std::format("Unexpected journal version {} (expected {})", version, EXPECTED_VERSION));
+    }
+    JournalEntry entries[while(!std::mem::eof())];
+};
+
+JournalBin journal @ 0x00;
+```
+
+### `checkpoint.bin` — Version 1
+
+The last fully committed sync cursor. Written last and atomically, so it is the
+commit point for a sync pass: a failure at any earlier stage leaves the previous
+checkpoint in place and the next pass simply re-pulls the same window.
+
+`updatedAfter` is the verbatim highest `updated_at` observed during a completed
+sync. It is never synthesized from device time — the device has no reliable RTC
+across power cycles, and a cursor slightly in the future loses documents
+permanently, whereas one slightly in the past only costs duplicates.
+
+`docCount` is the number of records retained locally. It is not the server's
+`count`, which saturates at 10,000 and can never signal completion; only a null
+`nextPageCursor` does.
+
+```c++
+#define EXPECTED_VERSION 1
+
+struct CheckpointBin {
+    u8   version;
+    char updatedAfter[33];  // NUL-padded ISO 8601
+    u16  docCount;
+    if (version != EXPECTED_VERSION) {
+        std::error(std::format("Unexpected checkpoint version {} (expected {})", version, EXPECTED_VERSION));
+    }
+};
+
+CheckpointBin checkpoint @ 0x00;
+```
+
+### `bodies/<id>.txt`
+
+Plain UTF-8 article text, stripped from the API's `html_content` as it streams.
+There is no header and no version: the file is either present or absent, and a
+truncated one is discarded and refetched.
+
+Bodies are fetched when a document is opened rather than prefetched, and are
+deleted when the document moves to `archive` or `feed` or disappears from a
+completed reconciliation sweep.
