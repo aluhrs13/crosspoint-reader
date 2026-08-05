@@ -9,9 +9,11 @@ Everything marked **verified** was observed against a live Reader account on 202
 Four results change what the feature can be. Read these before the reference sections.
 
 1. **`reading_progress` cannot be written.** `PATCH /update/` accepts it, answers `200`, and silently discards it. The device can read a reading position down from Readwise but cannot push one up. Verified against both an empty document and a 3,159-word article, with `title`, `seen`, and `location` writes succeeding in the same sequence as controls.
-2. **There are no deletion tombstones.** A deleted document simply disappears. An `updatedAfter` window spanning the deletion does not mention it, and fetching it by `id` returns `count: 0` rather than `404`. Incremental sync structurally cannot observe deletions.
+2. **There are no deletion tombstones.** A deleted document simply disappears. An `updatedAfter` window spanning the deletion does not mention it, and fetching it by `id` returns `count: 0` rather than `404`. Incremental sync structurally cannot observe deletions, so they are only discoverable by a full sweep of the synced locations.
 3. **A single article body is 88 KB.** That is roughly a quarter of the device's entire RAM for one field of one document, and a full metadata page is 135 KB. Nothing may be buffered whole.
 4. **Today's `StreamingJsonParser` silently drops any string over 512 bytes.** It does not truncate and does not error — the value callback is suppressed. This already affects `summary` (observed to 2,093 bytes), not just `html_content`.
+
+A fifth is worth knowing but does not constrain the MVP: **`count` saturates at 10,000** rather than reporting a true total, so it can never be used to size a sweep or detect completion.
 
 ## Authentication
 
@@ -75,7 +77,28 @@ GET /api/v3/list/?location=later&limit=100&updatedAfter=2026-08-01T00:00:00Z
 { "count": 10000, "nextPageCursor": "01hz…", "results": [ … ] }
 ```
 
-`count` is the total matching the query across all pages, not the page size. The probe account reported **10,000**, which is large enough that a full sweep is a real cost, not a rounding error — see [Reconciliation cost](#reconciliation-cost).
+`count` is the number matching the query across all pages, not the page size.
+
+**`count` saturates at 10,000 — verified.** It is not a true total. Below the cap it is exact; at or above it, it clamps:
+
+| Query | `count` |
+|---|---|
+| unfiltered | **10000** |
+| `location=feed` | **10000** |
+| `location=later` | 2275 |
+| `location=archive` | 261 |
+| `location=shortlist` | 19 |
+| `location=new` | 0 |
+| *sum of locations* | **12555** |
+| `category=rss` | **10000** |
+| `category=article` | 1879 |
+| *sum of all categories* | **13665** |
+
+The per-location counts sum to more than the unfiltered total, which is only possible if the total is clamped. Two unrelated queries landing on exactly 10,000 while every smaller query returns a precise, non-round number confirms it.
+
+**Consequences.** Never use `count` to size a sweep, to compute progress, or to decide that pagination is complete — only a `null` `nextPageCursor` means complete. A `count` of exactly 10,000 should be read as "10,000 or more".
+
+**Working past the cap.** Slicing a capped set by `updatedAfter` returns exact sub-counts (`feed` over the last 7/30/365 days: 108 / 1120 / 6849), so a set larger than the cap can be enumerated as a series of time windows. This matters only if `feed` is ever synced; see [Reconciliation cost](#reconciliation-cost).
 
 ### Document fields
 
@@ -151,9 +174,15 @@ Because a missing document is indistinguishable from a network failure, a sweep 
 
 ### Reconciliation cost
 
-With `count: 10000` on the probe account, a full sweep is 100 requests at 100 documents each. The list endpoint allows 20 requests/minute, so a complete sweep takes **at least five minutes of continuous requests** and transfers roughly 14 MB — with a fresh TLS handshake per request, since the server closes each connection.
+Sweep cost is set by how many documents are in scope, at 100 per request and 20 requests/minute, with a fresh TLS handshake each time because the server closes every connection.
 
-This is not something to run on every sync. Phase 2 and 3 should treat reconciliation as an occasional, explicitly-triggered operation, and should scope the sweep by `location` so only synced locations are swept.
+**Scoped to the synced locations, a sweep is cheap.** The MVP syncs `new` + `later`, which on the probe account is 2,275 documents: 23 requests, a little over a minute, ~3 MB. That is affordable as an occasional explicit operation, and it is comfortably below the `count` cap, so `count` is exact for this scope and the sweep is sound.
+
+**Unscoped, it is not.** The whole library is 10,000+ documents — at least 100 requests, five-plus minutes, ~14 MB — and because `count` saturates, an unscoped sweep cannot even tell you in advance how much work remains.
+
+So: always scope the sweep by `location` to the synced set. Never sweep unfiltered. If `feed` is ever brought into scope it exceeds the cap on its own and would need `updatedAfter` time-windowing rather than a single pass.
+
+One caveat left open deliberately: whether **pagination** also stops at 10,000, or only `count` does, was not tested — confirming it would mean 100+ requests and a five-minute rate-limit burn for a case the MVP scope never reaches. If `feed` sync is ever proposed, test that first, because time-windowing is only necessary if pagination is capped too.
 
 ## Updating documents
 
@@ -245,7 +274,9 @@ The API offers no plain-text body — `content` is not it, and `html_content` is
 
 ### Synced locations: `new` and `later`
 
-`archive` and `feed` are not synced by default. `feed` in particular is unbounded and dominated the probe account at 146 of 200 sampled documents — syncing it would mean syncing an RSS firehose onto an e-reader.
+`archive` and `feed` are not synced by default. `feed` is an RSS firehose: it accounted for 146 of 200 sampled documents and is the one location large enough to hit the `count` cap on its own. Syncing it would put an unbounded feed onto an e-reader and would force time-windowed enumeration.
+
+Scoping to `new` + `later` also keeps the synced set at 2,275 documents on the probe account, comfortably under the cap, which is what makes sweep-based deletion reconciliation sound.
 
 Note that `shortlist` exists and is not in the published docs. It should probably be synced too, but that is a product call to confirm rather than something the API forced.
 
@@ -265,16 +296,17 @@ A cached body is discarded when the document's `location` moves to `archive` or 
 |---|---|---|
 | 1 | `reading_progress` is not writable | Reading position sync is one-way. The device cannot tell Readwise where the user stopped. |
 | 2 | No deletion tombstones | Deletions require a full sweep; incremental sync alone will accumulate stale entries indefinitely. |
-| 3 | Full sweep costs ~5 minutes and ~14 MB at 10k documents | Reconciliation cannot be routine. Needs to be explicit and scoped by location. |
+| 3 | An unscoped full sweep costs 5+ minutes and ~14 MB | Reconciliation must be explicit and scoped by `location`. Scoped to `new`+`later` (2,275 docs) it is ~23 requests and affordable. |
 | 4 | `StreamingJsonParser` drops strings over 512 bytes silently | Blocks phase 4 until extended. Affects `summary` as well as `html_content`. |
 | 5 | No certificate verification on the wolfSSL path | Token interceptable by an active MITM. Accepted risk, recorded above. |
 | 6 | `PATCH` returns `200` for fields it ignores | No write can be trusted without a read-back. Cheap writes become two round trips. |
 | 7 | Published docs disagree with the wire format | `tags`, `reading_time`, `listening_time`, `location` values. Trust this document and the fixtures over the vendor docs. |
-| 8 | `count: 10000` may be a server-side cap rather than a true total | Not distinguished by the probe. If it is a cap, sweep-based reconciliation is unsound on very large libraries. **Unresolved.** |
+| 8 | `count` saturates at 10,000 | **Resolved: confirmed cap.** `count` cannot size a sweep or signal completion; only a null `nextPageCursor` does. Harmless at the MVP's scoped set of 2,275. |
 | 9 | Rate limits for update/delete not exercised | 50/min and 20/min are documented-only. |
 | 10 | Token has no expiry or refresh | A revoked token surfaces only as a `401` at request time. |
+| 11 | Unknown whether pagination is capped at 10,000 like `count` | Untested by choice — out of reach of the MVP scope. Must be settled before `feed` could ever be synced. |
 
-Risk 8 is the one worth closing before phase 2 freezes schemas: it decides whether a full sweep can ever be authoritative.
+Risks 1, 2, and 4 are the ones that shape phases 3–5. Risk 8 is closed: the cap is real, but the MVP's scoped sweep sits well below it, so reconciliation is sound for the synced set.
 
 ## Reproducing this
 

@@ -326,6 +326,27 @@ def run(probe, include_rate_limit):
         note="direct fetch of a deleted id",
     )
 
+    # --- 12. Is `count` a real total or a server-side cap? ----------------
+    # If the per-location counts sum to more than the unfiltered total, the
+    # total is saturating rather than counting. Each query costs one request,
+    # so this runs before the rate-limit probe.
+    for location in ("new", "later", "shortlist", "archive", "feed"):
+        probe.request(
+            f"12_count_location_{location}",
+            "GET",
+            list_url(limit=1, location=location),
+            note="per-location count; compare the sum against probe 03's total",
+        )
+    # If a capped set slices into exact sub-counts by time, windowing on
+    # updatedAfter is a viable way to enumerate past the cap.
+    for days in (7, 30, 365):
+        probe.request(
+            f"12_count_feed_{days}d",
+            "GET",
+            list_url(limit=1, location="feed", updatedAfter=iso_now(-days * 86400)),
+            note="does time-slicing a capped set yield exact counts",
+        )
+
     # --- 11. Rate limiting (opt-in; leaves LIST throttled for ~a minute) ---
     if not include_rate_limit:
         print(
