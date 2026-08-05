@@ -6,6 +6,7 @@ It is written for software developers who may be new to embedded development.
 - [Getting Started](./getting-started.md)
 - [Architecture Overview](./architecture.md)
 - [Development Workflow](./development-workflow.md)
+- [Syncing the Intentional Fork](./upstream-sync.md)
 - [Testing and Debugging](./testing-debugging.md)
 - [Touch and UI Development](./touch-and-ui.md)
 

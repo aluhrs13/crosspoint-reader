@@ -4,6 +4,9 @@ on:
     tags:
       - '*'
 
+permissions:
+  contents: write
+
 jobs:
   build-release:
     runs-on: ubuntu-latest
@@ -45,3 +48,18 @@ jobs:
             .pio/build/gh_release/firmware.elf
             .pio/build/gh_release/firmware.map
             .pio/build/gh_release/partitions.bin
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          firmware=".pio/build/gh_release/firmware.bin"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$firmware" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$firmware" \
+              --verify-tag \
+              --generate-notes \
+              --title "CrossPoint Reader $GITHUB_REF_NAME"
+          fi
