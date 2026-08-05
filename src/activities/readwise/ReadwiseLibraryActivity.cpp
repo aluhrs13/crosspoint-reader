@@ -242,6 +242,10 @@ void ReadwiseLibraryActivity::performDownload() {
   const std::string bodyPath = ReadwiseUi::bodyPathForId(pendingDownloadId.c_str());
   readwise::ApiStatus status = readwise::ApiStatus::LowMemory;
   if (!bodyPath.empty()) {
+    // Nothing else creates the bodies directory -- sync only ensures the base
+    // dir -- and SdFat's open-for-write fails outright on a missing parent,
+    // which aborted the very first article download as a ParseError.
+    store.ensureDir(std::string(ReadwiseCredentialStore::getDataDir()) + "/bodies");
     readwise::HttpReadwiseApi api(READWISE_STORE.getToken());
     // The writer carries the extractor's output buffer (~400 bytes of state)
     // and sits under a live TLS session -- heap, not the main-loop stack.
