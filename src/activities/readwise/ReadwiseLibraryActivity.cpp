@@ -26,9 +26,18 @@ namespace {
 constexpr unsigned long ARCHIVE_HOLD_MS = 1000;
 // One window of metadata; sized generously past a visible page.
 constexpr int WINDOW_SIZE = 32;
-}  // namespace
 
-constexpr readwise::Location ReadwiseLibraryActivity::LOCATIONS[];
+const char* locationLabel(const readwise::Location location) {
+  switch (location) {
+    case readwise::Location::Shortlist:
+      return tr(STR_READWISE_SHORTLIST);
+    case readwise::Location::Feed:
+      return tr(STR_READWISE_FEED);
+    default:
+      return tr(STR_READWISE_LATER);
+  }
+}
+}  // namespace
 
 void ReadwiseLibraryActivity::onEnter() {
   Activity::onEnter();
@@ -96,9 +105,8 @@ const readwise::Document* ReadwiseLibraryActivity::docAt(const int docIndex) {
   return &window[static_cast<size_t>(rel)];
 }
 
-void ReadwiseLibraryActivity::switchLocation(const int delta) {
-  constexpr int locationCount = static_cast<int>(sizeof(LOCATIONS) / sizeof(LOCATIONS[0]));
-  locationIndex = (locationIndex + delta + locationCount) % locationCount;
+void ReadwiseLibraryActivity::jumpToLocation(const int index) {
+  locationIndex = index;
   selectedIndex = 0;
   reloadCounts();
   requestUpdate();
@@ -149,11 +157,11 @@ void ReadwiseLibraryActivity::loop() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
-    switchLocation(-1);
+    jumpToLocation(leftTargetIndex());
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
-    switchLocation(1);
+    jumpToLocation(rightTargetIndex());
     return;
   }
 
@@ -325,7 +333,10 @@ void ReadwiseLibraryActivity::render(RenderLock&&) {
   const auto pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect headerRect{0, metrics.topPadding, pageWidth, metrics.headerHeight};
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
+  // The Left/Right hints name the destination view, so the button for the
+  // current view reads as the way back to Later.
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), locationLabel(LOCATIONS[leftTargetIndex()]),
+                                            locationLabel(LOCATIONS[rightTargetIndex()]));
 
   if (state == State::DOWNLOADING) {
     GUI.drawHeader(renderer, headerRect, tr(STR_READWISE_LIBRARY));
@@ -344,9 +355,7 @@ void ReadwiseLibraryActivity::render(RenderLock&&) {
     return;
   }
 
-  const char* locationLabel =
-      LOCATIONS[locationIndex] == readwise::Location::Later ? tr(STR_READWISE_LATER) : tr(STR_READWISE_NEW);
-  const std::string header = std::string(tr(STR_READWISE_LIBRARY)) + " - " + locationLabel;
+  const std::string header = std::string(tr(STR_READWISE_LIBRARY)) + " - " + locationLabel(LOCATIONS[locationIndex]);
   GUI.drawHeader(renderer, headerRect, header.c_str());
 
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;

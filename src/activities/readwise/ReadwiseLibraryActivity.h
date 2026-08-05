@@ -48,7 +48,12 @@ class ReadwiseLibraryActivity final : public Activity {
   void startDownload(const readwise::Document& doc);
   void performDownload();
   void queueArchive(const readwise::Document& doc);
-  void switchLocation(int delta);
+  void jumpToLocation(int index);
+  // Direct-jump targets for the Left/Right buttons: from Later they lead to
+  // Shortlist and Feed; from Shortlist or Feed the button for the current view
+  // leads back to Later. The hint labels name the destination view.
+  int leftTargetIndex() const { return locationIndex == 1 ? 0 : 1; }
+  int rightTargetIndex() const { return locationIndex == 2 ? 0 : 2; }
   int totalRows() const { return 1 + docCount; }
 
   readwise::NullReadwiseApi nullApi;
@@ -58,8 +63,10 @@ class ReadwiseLibraryActivity final : public Activity {
   ButtonNavigator buttonNavigator;
   State state = State::LIST;
 
-  // The synced locations the user can flip between with Left/Right.
-  static constexpr readwise::Location LOCATIONS[] = {readwise::Location::Later, readwise::Location::New};
+  // The library views, jumped between with Left/Right. Index 0 (Later) is the
+  // default; leftTargetIndex/rightTargetIndex encode the button mapping.
+  static constexpr readwise::Location LOCATIONS[] = {readwise::Location::Later, readwise::Location::Shortlist,
+                                                     readwise::Location::Feed};
   int locationIndex = 0;
   uint16_t docCount = 0;
 
