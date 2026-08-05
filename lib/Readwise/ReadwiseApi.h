@@ -95,8 +95,9 @@ class ReadwiseApi {
   virtual ApiStatus pushOp(const struct PendingOp& op) = 0;
 
   // Fetches one document with withHtmlContent=true and streams the body to
-  // `sink`. Used on-demand when a document is opened; bodies are never
-  // prefetched during sync. `retryAfterSeconds` is set on RateLimited.
+  // `sink`. Used by the sync pass to prefetch every missing body, and
+  // on-demand as the retry path when a document is opened. `retryAfterSeconds`
+  // is set on RateLimited.
   virtual ApiStatus fetchBody(const char* id, BodySink& sink, uint16_t* retryAfterSeconds) = 0;
 };
 

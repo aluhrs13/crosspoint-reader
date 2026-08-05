@@ -11,10 +11,6 @@
 namespace readwise {
 namespace {
 
-// Guards against a runaway server: with a 100-document page and a 100-document
-// cap, a sync should never need more than a handful of pages per location.
-constexpr int MAX_PAGES_PER_LOCATION = 64;
-
 // The API is rate-limited to 20 list requests per minute and answers 429 with a
 // retry-after of ~16 seconds. One retry is honoured; after that the pass is
 // abandoned rather than looped, because a blocking wait inside an activity can
@@ -145,7 +141,7 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   loadCheckpoint(checkpoint);
 
   std::vector<StagedRef> staged;
-  staged.reserve(documentCap_);
+  staged.reserve(static_cast<size_t>(documentCap_) + feedCap_);
   char highestUpdatedAt[TIMESTAMP_CAP] = {};
   copyBounded(highestUpdatedAt, TIMESTAMP_CAP, checkpoint.updatedAfter, strlen(checkpoint.updatedAfter));
 
@@ -161,9 +157,9 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   // --- 4. Merge and rebuild indexes --------------------------------------
   outcome.failedStage = SyncStage::RebuildingIndexes;
   std::vector<IndexEntry> indexEntries;
-  indexEntries.reserve(documentCap_);
+  indexEntries.reserve(static_cast<size_t>(documentCap_) + feedCap_);
   uint16_t retained = 0;
-  if (!mergeIntoDocs(stagingPath(), staged, /*carryOverExisting=*/true, indexEntries, retained)) {
+  if (!mergeIntoDocs(stagingPath(), staged, /*carryOverExisting=*/true, /*dropExpired=*/true, indexEntries, retained)) {
     store_.remove(stagingPath());
     journal_.removeAcknowledged(acknowledged);
     return outcome;
@@ -207,18 +203,43 @@ ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::v
     std::vector<StagedRef>* staged;
     uint8_t* buffer;
     uint32_t offset = 0;
-    uint16_t cap = 0;
     char* highest = nullptr;
     bool failed = false;
+    // Per-location policy state, set before each location's page loop. The
+    // non-feed locations share one counter (the document cap spans them);
+    // unread-only locations get their own counter and cap.
+    bool unreadOnly = false;
+    uint16_t* counter = nullptr;
+    uint16_t cap = 0;
+
+    void advanceCursor(const Document& doc) {
+      // The cursor is the highest updated_at actually observed, compared
+      // lexicographically -- ISO 8601 orders correctly as a string, and the
+      // device has no trustworthy clock to synthesize one from.
+      if (strncmp(doc.updatedAt, highest, TIMESTAMP_CAP) > 0) {
+        copyBounded(highest, TIMESTAMP_CAP, doc.updatedAt, strlen(doc.updatedAt));
+      }
+    }
 
     bool onDocument(const Document& doc) override {
-      if (staged->size() >= cap) {
-        // Stop early rather than buffering documents that will be dropped by the
-        // cap during the merge anyway.
-        return false;
+      if (*counter >= cap) {
+        // Past the cap: consume and discard the rest of the page. Returning
+        // false would abort the HTTP transfer mid-stream, which the transport
+        // reports as a failed request and would sink the whole pass; the page
+        // loop stops paginating once the cap is reached. The cursor must not
+        // advance either -- these documents were not processed.
+        return true;
       }
       Document copy = doc;
       engine->applyQueuedOverrides(copy);
+
+      if (unreadOnly && (copy.flags & FLAG_SEEN) != 0) {
+        // A read document in an unread-only location is never staged, but its
+        // updated_at still advances the checkpoint -- otherwise the same read
+        // items would be re-walked on every sync.
+        advanceCursor(copy);
+        return true;
+      }
 
       const size_t len = encodeDocument(copy, buffer, MAX_ENCODED_RECORD);
       if (len == 0 || !store->writeChunk(buffer, len)) {
@@ -231,13 +252,9 @@ ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::v
       ref.length = static_cast<uint32_t>(len);
       staged->push_back(ref);
       offset += static_cast<uint32_t>(len);
+      ++(*counter);
 
-      // The cursor is the highest updated_at actually observed, compared
-      // lexicographically -- ISO 8601 orders correctly as a string, and the
-      // device has no trustworthy clock to synthesize one from.
-      if (strncmp(copy.updatedAt, highest, TIMESTAMP_CAP) > 0) {
-        copyBounded(highest, TIMESTAMP_CAP, copy.updatedAt, strlen(copy.updatedAt));
-      }
+      advanceCursor(copy);
       return true;
     }
   };
@@ -251,17 +268,31 @@ ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::v
   sink.store = &store_;
   sink.staged = &staged;
   sink.buffer = recordBuffer_;
-  sink.cap = documentCap_;
   sink.highest = highestUpdatedAt;
 
-  for (Location location : DEFAULT_SYNCED_LOCATIONS) {
+  uint16_t sharedCount = 0;
+  uint16_t feedCount = 0;
+
+  for (const LocationPolicy& policy : SYNCED_LOCATIONS) {
+    sink.unreadOnly = policy.unreadOnly;
+    // Feed is additive to the shared document cap so an active firehose cannot
+    // starve the Later/Shortlist views.
+    sink.counter = policy.location == Location::Feed ? &feedCount : &sharedCount;
+    sink.cap = policy.location == Location::Feed ? feedCap_ : documentCap_;
+    if (*sink.counter >= sink.cap) {
+      // An earlier location exhausted this cap; every request here would only
+      // stream documents the sink refuses. Each request is a full TLS
+      // handshake, so skip the location outright.
+      continue;
+    }
+
     ListQuery query;
     query.updatedAfter = checkpoint.updatedAfter;
-    query.location = location;
+    query.location = policy.location;
     query.limit = 100;
 
     std::string cursor;
-    for (int page = 0; page < MAX_PAGES_PER_LOCATION; ++page) {
+    for (int page = 0; page < policy.maxPages; ++page) {
       query.pageCursor = cursor.c_str();
       ListResponse response = api_.fetchPage(query, sink);
 
@@ -277,6 +308,11 @@ ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::v
       if (sink.failed) {
         store_.abortWrite();
         return ApiStatus::ParseError;
+      }
+      // Once the location's cap is reached, further pages would only stream
+      // documents the sink refuses -- stop paginating.
+      if (*sink.counter >= sink.cap) {
+        break;
       }
       // Only a null cursor means the location is exhausted. `count` saturates at
       // 10,000 and can never be used to detect completion.
@@ -294,7 +330,7 @@ ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::v
 }
 
 bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std::vector<StagedRef>& staged,
-                                       bool carryOverExisting, std::vector<IndexEntry>& indexEntries,
+                                       bool carryOverExisting, bool dropExpired, std::vector<IndexEntry>& indexEntries,
                                        uint16_t& retained) {
   // Incoming documents are written first -- they are the most recently changed --
   // followed by previously cached documents that were not superseded, until the
@@ -346,9 +382,13 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
   };
 
   std::vector<uint32_t> offsets;
-  offsets.reserve(documentCap_);
+  offsets.reserve(static_cast<size_t>(documentCap_) + feedCap_);
   uint32_t cursor = static_cast<uint32_t>(DOCS_HEADER_SIZE);
   uint16_t written = 0;
+  // Feed has its own additive cap so a busy firehose cannot displace the
+  // Later/Shortlist documents, and vice versa.
+  uint16_t nonFeedWritten = 0;
+  uint16_t feedWritten = 0;
 
   // The header is rewritten at the end with the real LUT offset, so a
   // placeholder goes down first to reserve the space.
@@ -360,10 +400,10 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
   }
 
   // A body is dropped as soon as its document leaves the synced locations.
-  // Archived and feed documents are not readable from the device library, so
-  // keeping their text would waste SD space indefinitely.
+  // Archived and inbox (`new`) documents are not readable from the device
+  // library, so keeping their text would waste SD space indefinitely.
   auto evictBodyIfUnreadable = [&](Document& doc) {
-    if (doc.location != Location::Archive && doc.location != Location::Feed) {
+    if (isSyncedLocation(doc.location)) {
       return;
     }
     if ((doc.flags & FLAG_HAS_BODY) == 0) {
@@ -371,6 +411,27 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
     }
     store_.remove(bodyPath(doc.id));
     doc.flags &= static_cast<uint8_t>(~FLAG_HAS_BODY);
+  };
+
+  // Records the sync policy expires outright: `new`-location leftovers from
+  // before the Inbox view was dropped, and read documents in unread-only
+  // locations (feed read-removal -- overrides are applied before this check,
+  // so a locally queued `seen` counts too). Gated on dropExpired so that
+  // rebuildLocal, which runs on every library entry, never removes a feed
+  // article the user just read; removal happens at the next sync.
+  auto dropIfExpired = [&](Document& doc) {
+    if (!dropExpired) {
+      return false;
+    }
+    bool drop = doc.location == Location::New;
+    if (!drop) {
+      const LocationPolicy* policy = policyFor(doc.location);
+      drop = policy != nullptr && policy->unreadOnly && (doc.flags & FLAG_SEEN) != 0;
+    }
+    if (drop && (doc.flags & FLAG_HAS_BODY) != 0) {
+      store_.remove(bodyPath(doc.id));
+    }
+    return drop;
   };
 
   auto emit = [&](const Document& doc, size_t encodedLen) {
@@ -385,7 +446,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
   };
 
   for (const StagedRef& ref : staged) {
-    if (written >= documentCap_) {
+    if (nonFeedWritten >= documentCap_ && feedWritten >= feedCap_) {
       break;
     }
     const int read = store_.readRange(sourcePath, ref.offset, recordBuffer_, ref.length);
@@ -398,6 +459,18 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       return false;
     }
     restoreLocalFlags(scratchDoc_);
+    const bool isFeed = scratchDoc_.location == Location::Feed;
+    uint16_t& classWritten = isFeed ? feedWritten : nonFeedWritten;
+    if (classWritten >= (isFeed ? feedCap_ : documentCap_)) {
+      if (isFeed && (scratchDoc_.flags & FLAG_HAS_BODY) != 0) {
+        // A feed item displaced by the cap is gone for good; reclaim its body.
+        store_.remove(bodyPath(scratchDoc_.id));
+      }
+      continue;
+    }
+    if (dropIfExpired(scratchDoc_)) {
+      continue;
+    }
     evictBodyIfUnreadable(scratchDoc_);
     // Re-encode rather than replaying the source bytes: restoring local flags
     // and evicting a body both change them.
@@ -407,6 +480,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       return false;
     }
     emit(scratchDoc_, len);
+    ++classWritten;
   }
 
   // Carry over previously cached documents the pull did not supersede.
@@ -416,7 +490,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       store_.readRange(docsPath(), 0, existingHeader, DOCS_HEADER_SIZE) == static_cast<int>(DOCS_HEADER_SIZE) &&
       decodeDocsHeader(existingHeader, DOCS_HEADER_SIZE, existing)) {
     uint32_t readOffset = DOCS_HEADER_SIZE;
-    for (uint16_t i = 0; i < existing.recordCount && written < documentCap_; ++i) {
+    for (uint16_t i = 0; i < existing.recordCount && (nonFeedWritten < documentCap_ || feedWritten < feedCap_); ++i) {
       const int read = store_.readRange(docsPath(), readOffset, recordBuffer_, MAX_ENCODED_RECORD);
       if (read <= 0) {
         break;
@@ -438,6 +512,18 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
         continue;
       }
       applyQueuedOverrides(scratchDoc_);
+      const bool isFeed = scratchDoc_.location == Location::Feed;
+      uint16_t& classWritten = isFeed ? feedWritten : nonFeedWritten;
+      if (classWritten >= (isFeed ? feedCap_ : documentCap_)) {
+        if (isFeed && (scratchDoc_.flags & FLAG_HAS_BODY) != 0) {
+          // Displaced by newer staged feed items; reclaim the body.
+          store_.remove(bodyPath(scratchDoc_.id));
+        }
+        continue;
+      }
+      if (dropIfExpired(scratchDoc_)) {
+        continue;
+      }
       evictBodyIfUnreadable(scratchDoc_);
       const size_t len = encodeDocument(scratchDoc_, recordBuffer_, MAX_ENCODED_RECORD);
       if (len == 0 || !store_.writeChunk(recordBuffer_, len)) {
@@ -445,6 +531,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
         return false;
       }
       emit(scratchDoc_, len);
+      ++classWritten;
     }
   }
 
@@ -481,7 +568,12 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
 }
 
 bool ReadwiseSyncEngine::writeIndexes(std::vector<IndexEntry>& indexEntries) {
-  for (Location location : DEFAULT_SYNCED_LOCATIONS) {
+  // The Inbox view was dropped; clear the orphaned index a pre-upgrade sync may
+  // have left behind. Failure is ignored -- the file usually does not exist.
+  store_.remove(indexPath(Location::New));
+
+  for (const LocationPolicy& policy : SYNCED_LOCATIONS) {
+    const Location location = policy.location;
     std::vector<const IndexEntry*> matching;
     matching.reserve(indexEntries.size());
     for (const IndexEntry& entry : indexEntries) {
@@ -588,9 +680,11 @@ bool ReadwiseSyncEngine::rebuildLocal() {
   // No staged documents: everything carries over from the existing docs.bin,
   // and the carry-over path applies the queued overrides and body eviction.
   std::vector<IndexEntry> indexEntries;
-  indexEntries.reserve(documentCap_);
+  indexEntries.reserve(static_cast<size_t>(documentCap_) + feedCap_);
   uint16_t retained = 0;
-  if (!mergeIntoDocs(docsPath(), {}, /*carryOverExisting=*/true, indexEntries, retained)) {
+  // dropExpired is false: a feed article the user just read must stay openable
+  // until the next sync, and rebuildLocal runs on every library entry.
+  if (!mergeIntoDocs(docsPath(), {}, /*carryOverExisting=*/true, /*dropExpired=*/false, indexEntries, retained)) {
     return false;
   }
   return writeIndexes(indexEntries);
@@ -654,6 +748,14 @@ ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(co
       size_t consumed = 0;
       if (!decodeDocument(recordBuffer_, static_cast<size_t>(read), scratchDoc_, &consumed)) {
         break;
+      }
+      // Only documents readable from the library get a body: fetching for an
+      // archived leftover would be wasted transfer, and the merge would evict
+      // it again on the next sync anyway. Feed passes -- its items read
+      // offline like everything else.
+      if (!isSyncedLocation(scratchDoc_.location)) {
+        offset += static_cast<uint32_t>(consumed);
+        continue;
       }
       // Missing means no flag, or a flag whose file has gone (cache cleared).
       if ((scratchDoc_.flags & FLAG_HAS_BODY) == 0 || !store_.exists(bodyPath(scratchDoc_.id))) {
@@ -799,12 +901,17 @@ SyncOutcome ReadwiseSyncEngine::reconcile() {
   IdSink sink;
   sink.ids = &liveIds;
 
-  for (Location location : DEFAULT_SYNCED_LOCATIONS) {
+  // Feed is not swept: it exceeds the `count` cap on its own, and its items
+  // expire via the unread filter and the feed cap instead of by deletion.
+  for (const LocationPolicy& policy : SYNCED_LOCATIONS) {
+    if (!policy.reconcileSweep) {
+      continue;
+    }
     ListQuery query;
-    query.location = location;
+    query.location = policy.location;
     query.limit = 100;
     std::string cursor;
-    for (int page = 0; page < MAX_PAGES_PER_LOCATION; ++page) {
+    for (int page = 0; page < policy.maxPages; ++page) {
       query.pageCursor = cursor.c_str();
       const ListResponse response = api_.fetchPage(query, sink);
       if (response.status != ApiStatus::Ok) {
@@ -846,11 +953,17 @@ SyncOutcome ReadwiseSyncEngine::reconcile() {
     if (!decodeDocument(recordBuffer_, static_cast<size_t>(read), scratchDoc_, &consumed)) {
       break;
     }
-    bool alive = false;
+    // A document in a synced-but-unswept location (feed) cannot appear in the
+    // sweep, so its absence proves nothing; it is alive by definition and
+    // expires only through the merge's unread/cap rules.
+    const LocationPolicy* policy = policyFor(scratchDoc_.location);
+    bool alive = policy != nullptr && !policy->reconcileSweep;
     for (const std::string& id : liveIds) {
+      if (alive) {
+        break;
+      }
       if (id == scratchDoc_.id) {
         alive = true;
-        break;
       }
     }
     if (alive) {
@@ -870,7 +983,8 @@ SyncOutcome ReadwiseSyncEngine::reconcile() {
   std::vector<IndexEntry> indexEntries;
   indexEntries.reserve(survivors.size());
   uint16_t retained = 0;
-  if (!mergeIntoDocs(docsPath(), survivors, /*carryOverExisting=*/false, indexEntries, retained) ||
+  if (!mergeIntoDocs(docsPath(), survivors, /*carryOverExisting=*/false, /*dropExpired=*/true, indexEntries,
+                     retained) ||
       !writeIndexes(indexEntries)) {
     return outcome;
   }

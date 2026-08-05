@@ -178,7 +178,7 @@ Because a missing document is indistinguishable from a network failure, a sweep 
 
 Sweep cost is set by how many documents are in scope, at 100 per request and 20 requests/minute, with a fresh TLS handshake each time because the server closes every connection.
 
-**Scoped to the synced locations, a sweep is cheap.** The MVP syncs `new` + `later`, which on the probe account is 2,275 documents: 23 requests, a little over a minute, ~3 MB. That is affordable as an occasional explicit operation, and it is comfortably below the `count` cap, so `count` is exact for this scope and the sweep is sound.
+**Scoped to the sweepable locations, a sweep is cheap.** The sweep covers `later` + `shortlist` (see MVP decisions; `feed` is synced but deliberately excluded from the sweep), which on the probe account is 2,294 documents: ~24 requests, a little over a minute, ~3 MB. That is affordable as an occasional explicit operation, and it is comfortably below the `count` cap, so `count` is exact for this scope and the sweep is sound.
 
 **Unscoped, it is not.** The whole library is 10,000+ documents — at least 100 requests, five-plus minutes, ~14 MB — and because `count` saturates, an unscoped sweep cannot even tell you in advance how much work remains.
 
@@ -274,13 +274,15 @@ The API offers no plain-text body — `content` is not it, and `html_content` is
 
 *Why:* it avoids routing Readwise documents through the EPUB layout and section-cache pipeline, which is the larger cost by far, and it keeps peak RAM at one chunk rather than one document. The trade is losing headings, emphasis, and images. Given an 88 KB body against a 380 KB ceiling, this is the only option that fits without new machinery.
 
-### Synced locations: `new` and `later`
+### Synced locations: `later`, `shortlist`, and `feed` (unread-only)
 
-`archive` and `feed` are not synced by default. `feed` is an RSS firehose: it accounted for 146 of 200 sampled documents and is the one location large enough to hit the `count` cap on its own. Syncing it would put an unbounded feed onto an e-reader and would force time-windowed enumeration.
+**Revised (owner decision, 2026-08-05).** The original MVP synced `new` + `later`. The library views are now Later, Shortlist and Feed, and `new` (the Inbox) is dropped entirely — its index file, records and bodies are cleared on the first post-upgrade sync.
 
-Scoping to `new` + `later` also keeps the synced set at 2,275 documents on the probe account, comfortably under the cap, which is what makes sweep-based deletion reconciliation sound.
+- `later` and `shortlist` sync normally and participate in the deletion sweep. Both are small and exact-countable, so the sweep stays sound.
+- `feed` syncs **unread-only, capped at the newest ~50 items** (`DEFAULT_FEED_CAP`), additive to the document cap. The API offers no server-side unread filter, so documents with `first_opened_at` set are skipped client-side during the pull; a feed item read (on the device or elsewhere) is removed locally — record, index entry and body — at the next sync. The feed walk is hard-bounded at `FEED_MAX_PAGES` (5) pages per pass and skipped items still advance the `updatedAfter` cursor, so the firehose is never enumerated. Feed is **excluded from the reconcile sweep**; its items expire via the unread filter and the cap instead.
+- **Ordering assumption:** the capped pull assumes list results arrive newest-first. This was not recorded during the probe run. If it is wrong, the first sync collects older unread items within the page bound, but the merge keeps the newest-updated documents, so the set converges over subsequent syncs. Worth confirming with one `scripts/readwise_probe.py` run.
 
-Note that `shortlist` exists and is not in the published docs. It should probably be synced too, but that is a product call to confirm rather than something the API forced.
+Because the feed walk never paginates past `FEED_MAX_PAGES`, open risk #11 (whether pagination caps at 10,000 like `count`) remains untested but out of reach.
 
 ### Cap: 100 documents of metadata, bodies prefetched during sync
 

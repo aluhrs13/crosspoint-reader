@@ -103,9 +103,11 @@ TEST(ReadwiseSync, FailureBeforeCommitPreservesPreviousCheckpoint) {
   ASSERT_TRUE(f.engine.loadCheckpoint(before));
 
   // Second sync: fail the very last durable write, which is the checkpoint.
+  // Durable writes per sync: staging commit, docs.bin commit, three index
+  // writeAlls (Later, Shortlist, Feed), then the checkpoint.
   f.api.pages.push_back({{makeDoc("doc2", Location::Later, kT3, kT3)}, "", ApiStatus::Ok});
   const int writesBefore = f.store.writeCount();
-  f.store.failAtWrite(writesBefore + 5);
+  f.store.failAtWrite(writesBefore + 6);
 
   f.engine.sync();
 
@@ -245,15 +247,15 @@ TEST(ReadwiseSync, FailedPushPreservesUnacknowledgedOps) {
 // pushed. Every other field takes the remote value.
 TEST(ReadwiseSync, QueuedLocalValueWinsForItsFieldOnly) {
   Fixture f;
-  // The user moved the document to New locally. The server still reports Later,
-  // with a newer revision than the one recorded when the op was queued -- so the
-  // document also changed remotely.
-  ASSERT_TRUE(f.engine.queueLocationChange("doc1", Location::New, kT1));
+  // The user moved the document to Shortlist locally. The server still reports
+  // Later, with a newer revision than the one recorded when the op was queued --
+  // so the document also changed remotely.
+  ASSERT_TRUE(f.engine.queueLocationChange("doc1", Location::Shortlist, kT1));
   f.api.pages.push_back({{makeDoc("doc1", Location::Later, kT3, kT3)}, "", ApiStatus::Ok});
   ASSERT_TRUE(f.engine.sync().ok);
 
   std::vector<Document> page;
-  ASSERT_TRUE(f.engine.readIndexPage(Location::New, 0, 10, page));
+  ASSERT_TRUE(f.engine.readIndexPage(Location::Shortlist, 0, 10, page));
   ASSERT_EQ(page.size(), 1u) << "the local location must win for its own field";
   EXPECT_STREQ(page[0].id, "doc1");
   // Everything the user did not touch comes from the server.
@@ -273,11 +275,12 @@ TEST(ReadwiseSync, LocallyArchivedDocumentLeavesTheSyncedIndexes) {
 
   std::vector<Document> page;
   EXPECT_FALSE(f.engine.readIndexPage(Location::Later, 0, 10, page) && !page.empty());
-  EXPECT_FALSE(f.engine.readIndexPage(Location::New, 0, 10, page) && !page.empty());
+  EXPECT_FALSE(f.engine.readIndexPage(Location::Shortlist, 0, 10, page) && !page.empty());
+  EXPECT_FALSE(f.engine.readIndexPage(Location::Feed, 0, 10, page) && !page.empty());
 }
 
 // A body is only useful while the document is readable from the library, so
-// moving to archive or feed must reclaim its SD space.
+// moving to an unsynced location (archive, new) must reclaim its SD space.
 TEST(ReadwiseSync, BodyIsEvictedWhenDocumentLeavesTheLibrary) {
   Fixture f;
   Document withBody = makeDoc("doc1", Location::Later, kT1, kT1);
@@ -490,15 +493,231 @@ TEST(ReadwiseSync, DownloadMissingBodiesSkipsFailuresButAbortsOnAuth) {
 
 TEST(ReadwiseSync, FindDocumentById) {
   Fixture f;
-  f.api.pages.push_back(
-      {{makeDoc("doc1", Location::Later, kT1, kT1), makeDoc("doc2", Location::New, kT2, kT2)}, "", ApiStatus::Ok});
+  f.api.pages.push_back({{makeDoc("doc1", Location::Later, kT1, kT1), makeDoc("doc2", Location::Shortlist, kT2, kT2)},
+                         "",
+                         ApiStatus::Ok});
   ASSERT_TRUE(f.engine.sync().ok);
 
   Document found;
   ASSERT_TRUE(f.engine.findDocument("doc2", found));
-  EXPECT_EQ(found.location, Location::New);
+  EXPECT_EQ(found.location, Location::Shortlist);
   EXPECT_FALSE(f.engine.findDocument("missing", found));
   EXPECT_FALSE(f.engine.findDocument(nullptr, found));
+}
+
+// --- feed -----------------------------------------------------------------
+//
+// The pull walks the synced locations in policy-table order (Later, Shortlist,
+// Feed) and the fake serves pages FIFO regardless of location, so a feed page
+// must be preceded by one page for each non-feed location.
+
+namespace {
+void pushEmptyPagesForNonFeed(Fixture& f) {
+  f.api.pages.push_back({{}, "", ApiStatus::Ok});  // Later
+  f.api.pages.push_back({{}, "", ApiStatus::Ok});  // Shortlist
+}
+
+Document makeSeenDoc(const char* id, Location location, const char* updatedAt, const char* lastMovedAt) {
+  Document doc = makeDoc(id, location, updatedAt, lastMovedAt);
+  doc.flags |= FLAG_SEEN;
+  return doc;
+}
+}  // namespace
+
+// The API has no server-side unread filter, so read feed items are skipped
+// client-side -- but their updated_at still advances the checkpoint, or the
+// same read items would be re-walked on every sync.
+TEST(ReadwiseSync, FeedPullSkipsSeenDocuments) {
+  Fixture f;
+  pushEmptyPagesForNonFeed(f);
+  f.api.pages.push_back(
+      {{makeDoc("f1", Location::Feed, kT1, kT1), makeSeenDoc("f2", Location::Feed, kT2, kT2)}, "", ApiStatus::Ok});
+
+  const SyncOutcome outcome = f.engine.sync();
+  ASSERT_TRUE(outcome.ok) << "failed at stage " << static_cast<int>(outcome.failedStage);
+  EXPECT_EQ(outcome.pulled, 1);
+
+  std::vector<Document> page;
+  ASSERT_TRUE(f.engine.readIndexPage(Location::Feed, 0, 10, page));
+  ASSERT_EQ(page.size(), 1u);
+  EXPECT_STREQ(page[0].id, "f1");
+
+  Checkpoint checkpoint;
+  ASSERT_TRUE(f.engine.loadCheckpoint(checkpoint));
+  EXPECT_STREQ(checkpoint.updatedAfter, kT2) << "a skipped read item must still advance the cursor";
+}
+
+// Feed is a firehose; once the cap is collected the walk must stop rather than
+// paginate to a null cursor.
+TEST(ReadwiseSync, FeedPullStopsAtCapWithoutWalkingMorePages) {
+  Fixture f;
+  f.engine.setFeedCap(2);
+  pushEmptyPagesForNonFeed(f);
+  f.api.pages.push_back(
+      {{makeDoc("f1", Location::Feed, kT2, kT2), makeDoc("f2", Location::Feed, kT1, kT1)}, "cursor1", ApiStatus::Ok});
+  f.api.pages.push_back({{makeDoc("f3", Location::Feed, kT3, kT3)}, "", ApiStatus::Ok});
+
+  ASSERT_TRUE(f.engine.sync().ok);
+  EXPECT_EQ(f.engine.indexCount(Location::Feed), 2u);
+  EXPECT_EQ(f.api.pageIndex, 3u) << "the page past the cap must not be fetched";
+  EXPECT_EQ(f.api.queries.size(), 3u);
+}
+
+// Whether the API caps pagination at 10,000 documents is untested territory;
+// the feed walk must never get anywhere near it.
+TEST(ReadwiseSync, FeedPaginationIsBoundedByMaxPages) {
+  Fixture f;
+  pushEmptyPagesForNonFeed(f);
+  // Every feed page returns a cursor, simulating an endless firehose of read
+  // items (nothing staged, so the cap never trips).
+  for (int i = 0; i < FEED_MAX_PAGES + 2; ++i) {
+    const std::string id = "f" + std::to_string(i);
+    f.api.pages.push_back({{makeSeenDoc(id.c_str(), Location::Feed, kT1, kT1)}, "more", ApiStatus::Ok});
+  }
+
+  ASSERT_TRUE(f.engine.sync().ok);
+  EXPECT_EQ(f.api.queries.size(), 2u + FEED_MAX_PAGES) << "the feed walk must stop at FEED_MAX_PAGES";
+}
+
+// "Never sync read feed items" has a cleanup side: an item read on the device
+// is removed -- record, index entry and body -- at the next sync.
+TEST(ReadwiseSync, SeenFeedDocIsRemovedOnNextSync) {
+  Fixture f;
+  pushEmptyPagesForNonFeed(f);
+  f.api.pages.push_back({{makeDoc("f1", Location::Feed, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  const std::string body = f.engine.bodyPath("f1");
+  f.store.put(body, {'t', 'e', 'x', 't'});
+  ASSERT_TRUE(f.engine.setBodyCached("f1", true));
+  ASSERT_TRUE(f.engine.queueSeen("f1", kT1));
+
+  // Next sync pulls nothing new; the queued seen expires the item at merge.
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  Document doc;
+  EXPECT_FALSE(f.engine.findDocument("f1", doc)) << "a read feed item must leave docs.bin at the next sync";
+  EXPECT_EQ(f.engine.indexCount(Location::Feed), 0u);
+  EXPECT_FALSE(f.store.has(body)) << "the body goes with the record";
+}
+
+// The removal is deliberately deferred to the next sync: rebuildLocal runs on
+// every library entry, and the article the user just read must stay openable.
+TEST(ReadwiseSync, RebuildLocalDoesNotRemoveSeenFeedDoc) {
+  Fixture f;
+  pushEmptyPagesForNonFeed(f);
+  f.api.pages.push_back({{makeDoc("f1", Location::Feed, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_TRUE(f.engine.queueSeen("f1", kT1));
+  ASSERT_TRUE(f.engine.rebuildLocal());
+
+  Document doc;
+  EXPECT_TRUE(f.engine.findDocument("f1", doc)) << "reading a feed item must not expire it before the next sync";
+  EXPECT_EQ(f.engine.indexCount(Location::Feed), 1u);
+}
+
+// Feed cannot be swept for deletions -- it exceeds the API's count cap on its
+// own -- so a completed sweep that never saw a feed doc must not expire it.
+TEST(ReadwiseSync, ReconcileSweepExcludesFeed) {
+  Fixture f;
+  f.api.pages.push_back({{makeDoc("L1", Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  f.api.pages.push_back({{}, "", ApiStatus::Ok});  // Shortlist
+  f.api.pages.push_back({{makeDoc("f1", Location::Feed, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  const std::string body = f.engine.bodyPath("f1");
+  f.store.put(body, {'t', 'e', 'x', 't'});
+  ASSERT_TRUE(f.engine.setBodyCached("f1", true));
+
+  // The sweep answers for Later and Shortlist only.
+  const size_t queriesBefore = f.api.queries.size();
+  f.api.pages.push_back({{makeDoc("L1", Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  f.api.pages.push_back({{}, "", ApiStatus::Ok});  // Shortlist
+  ASSERT_TRUE(f.engine.reconcile().ok);
+
+  for (size_t i = queriesBefore; i < f.api.queries.size(); ++i) {
+    EXPECT_NE(f.api.queries[i].location, Location::Feed) << "the sweep must never enumerate feed";
+  }
+  Document doc;
+  EXPECT_TRUE(f.engine.findDocument("f1", doc)) << "absence from a sweep that excludes feed proves nothing";
+  EXPECT_TRUE(f.store.has(body));
+}
+
+// When the cap displaces feed items, the newest survive: staged documents are
+// written before carry-over, and docs.bin holds newest-first within a pull.
+TEST(ReadwiseSync, FeedCapKeepsNewestAtMerge) {
+  Fixture f;
+  f.engine.setFeedCap(2);
+  pushEmptyPagesForNonFeed(f);
+  f.api.pages.push_back(
+      {{makeDoc("f2", Location::Feed, kT2, kT2), makeDoc("f1", Location::Feed, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  const std::string oldBody = f.engine.bodyPath("f1");
+  f.store.put(oldBody, {'t', 'e', 'x', 't'});
+  ASSERT_TRUE(f.engine.setBodyCached("f1", true));
+
+  // A newer item arrives; the cap is 2, so the oldest carried-over item goes.
+  pushEmptyPagesForNonFeed(f);
+  f.api.pages.push_back({{makeDoc("f3", Location::Feed, kT3, kT3)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  std::vector<Document> page;
+  ASSERT_TRUE(f.engine.readIndexPage(Location::Feed, 0, 10, page));
+  ASSERT_EQ(page.size(), 2u);
+  EXPECT_STREQ(page[0].id, "f3");
+  EXPECT_STREQ(page[1].id, "f2");
+  Document doc;
+  EXPECT_FALSE(f.engine.findDocument("f1", doc)) << "the displaced item must leave docs.bin";
+  EXPECT_FALSE(f.store.has(oldBody)) << "a displaced feed item's body is reclaimed";
+}
+
+// Bodies are prefetched only for documents readable from the library: feed is
+// included, unsynced leftovers (archive) are not.
+TEST(ReadwiseSync, BodyPrefetchSkipsUnsyncedLocationsAndIncludesFeed) {
+  Fixture f;
+  f.api.pages.push_back(
+      {{makeDoc("L1", Location::Later, kT1, kT1), makeDoc("A1", Location::Archive, kT2, kT2)}, "", ApiStatus::Ok});
+  f.api.pages.push_back({{}, "", ApiStatus::Ok});  // Shortlist
+  f.api.pages.push_back({{makeDoc("f1", Location::Feed, kT3, kT3)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  f.api.bodies["L1"] = "<p>later</p>";
+  f.api.bodies["A1"] = "<p>archived</p>";
+  f.api.bodies["f1"] = "<p>feed</p>";
+
+  BodyHookRecorder rec;
+  const auto outcome = f.engine.downloadMissingBodies(rec.hooks());
+  ASSERT_TRUE(outcome.ok);
+  EXPECT_EQ(outcome.total, 2);
+  EXPECT_EQ(outcome.downloaded, 2);
+  EXPECT_EQ(f.api.bodyFetches, 2) << "an archived leftover must not cost a fetch";
+  EXPECT_TRUE(f.store.has(f.engine.bodyPath("L1")));
+  EXPECT_TRUE(f.store.has(f.engine.bodyPath("f1")));
+  EXPECT_FALSE(f.store.has(f.engine.bodyPath("A1")));
+}
+
+// Upgrade path: the Inbox ("new") view no longer exists. Its index file, any
+// new-location records, and their bodies are all cleared by the first sync.
+TEST(ReadwiseSync, UpgradeDropsNewLocationArtifacts) {
+  Fixture f;
+  f.api.pages.push_back({{makeDoc("doc1", Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  const std::string body = f.engine.bodyPath("doc1");
+  f.store.put(body, {'t', 'e', 'x', 't'});
+  ASSERT_TRUE(f.engine.setBodyCached("doc1", true));
+  // A pre-upgrade sync left an inbox index behind.
+  f.store.put(f.engine.indexPath(Location::New), {0x01, 0x00});
+
+  // The server has since moved the document to the inbox.
+  f.api.pages.push_back({{makeDoc("doc1", Location::New, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  EXPECT_FALSE(f.store.has(f.engine.indexPath(Location::New))) << "the orphaned inbox index must be removed";
+  Document doc;
+  EXPECT_FALSE(f.engine.findDocument("doc1", doc)) << "inbox documents are no longer cached";
+  EXPECT_FALSE(f.store.has(body));
 }
 
 TEST(ReadwiseSync, CompletedSweepExpiresMissingDocuments) {

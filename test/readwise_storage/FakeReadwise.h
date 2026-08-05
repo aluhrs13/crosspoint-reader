@@ -162,7 +162,11 @@ class FakeApi : public readwise::ReadwiseApi {
     }
     for (const readwise::Document& doc : page.documents) {
       if (!sink.onDocument(doc)) {
-        break;
+        // Mirror the real transport: a sink that refuses a document aborts the
+        // HTTP transfer mid-stream, and HttpReadwiseApi reports that as a
+        // failed request. The engine must consume every page it asks for.
+        response.status = readwise::ApiStatus::NetworkError;
+        return response;
       }
     }
     readwise::copyBounded(response.nextPageCursor, readwise::CURSOR_CAP, page.nextCursor.c_str(),

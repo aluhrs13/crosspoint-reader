@@ -19,14 +19,51 @@
 
 namespace readwise {
 
-// The locations synced by default. `feed` is excluded deliberately: it is an RSS
-// firehose, accounted for 146 of 200 sampled documents, and is the one location
-// large enough to hit the API's 10,000 `count` cap on its own.
-inline constexpr Location DEFAULT_SYNCED_LOCATIONS[] = {Location::New, Location::Later};
+// Per-location sync policy. `feed` is an RSS firehose large enough to hit the
+// API's 10,000 `count` cap on its own, and the API offers no server-side unread
+// filter -- so feed syncs unread-only (seen docs are skipped during the pull and
+// dropped at merge), is hard-bounded in pages walked, and is excluded from the
+// deletion reconcile sweep (it expires via the unread filter and its cap
+// instead). `new` (the Readwise Inbox) is deliberately not synced: the library
+// views are Later, Shortlist and Feed.
+struct LocationPolicy {
+  Location location;
+  bool unreadOnly;      // skip FLAG_SEEN docs during pull; drop seen records at sync merge
+  bool reconcileSweep;  // participates in the deletion sweep
+  uint8_t maxPages;     // pagination bound for this location
+};
 
-// Metadata cap. Bodies are not prefetched -- they are fetched on open and cached
-// under bodies/<id>.txt -- so this bounds only the index, not transfer volume.
+// Guards against a runaway server: with a 100-document page and a 100-document
+// cap, a sync should never need more than a handful of pages per location.
+inline constexpr uint8_t DEFAULT_MAX_PAGES = 64;
+// The feed walk never paginates past this, so the untested question of whether
+// the API caps pagination at 10,000 documents stays out of reach.
+inline constexpr uint8_t FEED_MAX_PAGES = 5;
+
+inline constexpr LocationPolicy SYNCED_LOCATIONS[] = {
+    {Location::Later, false, true, DEFAULT_MAX_PAGES},
+    {Location::Shortlist, false, true, DEFAULT_MAX_PAGES},
+    {Location::Feed, true, false, FEED_MAX_PAGES},
+};
+
+constexpr const LocationPolicy* policyFor(Location location) {
+  for (const LocationPolicy& policy : SYNCED_LOCATIONS) {
+    if (policy.location == location) {
+      return &policy;
+    }
+  }
+  return nullptr;
+}
+
+constexpr bool isSyncedLocation(Location location) { return policyFor(location) != nullptr; }
+
+// Metadata cap for the non-feed locations combined. Bodies are also prefetched
+// during sync (see downloadMissingBodies), so this bounds transfer volume too.
 inline constexpr uint16_t DEFAULT_DOCUMENT_CAP = 100;
+
+// Feed is additive to the document cap: at most this many unread feed items are
+// kept, newest first.
+inline constexpr uint16_t DEFAULT_FEED_CAP = 50;
 
 enum class SyncStage : uint8_t {
   Idle = 0,
@@ -125,6 +162,7 @@ class ReadwiseSyncEngine {
   ReadwiseJournal& journal() { return journal_; }
 
   void setDocumentCap(uint16_t cap) { documentCap_ = cap; }
+  void setFeedCap(uint16_t cap) { feedCap_ = cap; }
 
   std::string docsPath() const { return baseDir_ + "/docs.bin"; }
   std::string journalPath() const { return baseDir_ + "/journal.bin"; }
@@ -156,8 +194,13 @@ class ReadwiseSyncEngine {
   // not supersede are appended until the cap is reached -- that is the sync
   // path. Reconciliation passes false, because its refs already describe the
   // complete surviving set.
+  //
+  // `dropExpired` removes records (and bodies) the sync policy says must go:
+  // `new`-location leftovers and seen documents in unread-only locations.
+  // sync() and reconcile() pass true; rebuildLocal() passes false so a feed
+  // article read on the device stays openable until the next sync.
   bool mergeIntoDocs(const std::string& sourcePath, const std::vector<StagedRef>& refs, bool carryOverExisting,
-                     std::vector<IndexEntry>& indexEntries, uint16_t& retained);
+                     bool dropExpired, std::vector<IndexEntry>& indexEntries, uint16_t& retained);
   bool writeIndexes(std::vector<IndexEntry>& indexEntries);
   bool commitCheckpoint(const char* updatedAfter, uint16_t docCount);
   void applyQueuedOverrides(Document& doc) const;
@@ -169,6 +212,7 @@ class ReadwiseSyncEngine {
   std::string baseDir_;
   ReadwiseJournal journal_;
   uint16_t documentCap_ = DEFAULT_DOCUMENT_CAP;
+  uint16_t feedCap_ = DEFAULT_FEED_CAP;
 
   // Reused across the streaming loops rather than constructed per document: a
   // Document is ~800 bytes, well over the project's 256-byte stack guidance.
