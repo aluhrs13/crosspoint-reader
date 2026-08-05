@@ -99,4 +99,10 @@ const char* locationName(Location location);
 // NUL-terminating. Every string field is written through this.
 void copyBounded(char* dst, size_t dstCap, const char* src, size_t srcLen);
 
+// True for an id safe to embed in an SD path (bodies/<id>.txt). Ids observed
+// on the wire are 26-character lowercase ULIDs; anything outside [0-9a-z] or
+// an implausible length is refused, because ids arrive over an unverified TLS
+// session and a crafted "../" id could otherwise escape the bodies directory.
+bool isValidDocumentId(const char* id);
+
 }  // namespace readwise

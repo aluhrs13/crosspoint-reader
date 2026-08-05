@@ -149,7 +149,13 @@ uint16_t parseRetryAfter(const char* headerValue) {
   if (headerValue == nullptr || headerValue[0] == '\0') {
     return 0;
   }
-  const long value = strtol(headerValue, nullptr, 10);
+  char* end = nullptr;
+  const long value = strtol(headerValue, &end, 10);
+  // Trailing junk ("16junk") means the value cannot be trusted; 0 reads as
+  // "no guidance" and the caller abandons rather than retrying blind.
+  if (end == headerValue || (end != nullptr && *end != '\0')) {
+    return 0;
+  }
   if (value <= 0 || value > 0xFFFF) {
     return 0;
   }

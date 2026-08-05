@@ -82,6 +82,15 @@ class ReadwiseSyncEngine {
   // reopened (e.g. resume after restart) and the UI needs its metadata back.
   bool findDocument(const char* id, Document& out);
 
+  // Marks a document's body as cached (or not) by patching the flags byte of
+  // its record in place. Without this, a downloaded article would read as
+  // "not downloaded" after the post-download restart and be fetched again.
+  // In-place rather than a full rewrite: the flags byte is the last byte of a
+  // fixed-position record, so a torn write costs at worst one redundant
+  // re-download, while a full ~70 KB docs.bin rewrite per article download
+  // would be real SD wear.
+  bool setBodyCached(const char* id, bool cached);
+
   // Total entries in one location index, for list sizing. Returns 0 when the
   // index is absent.
   uint16_t indexCount(Location location);

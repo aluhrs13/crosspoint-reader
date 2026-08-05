@@ -150,13 +150,21 @@ TEST(StreamingJsonParser, StringEscapes) {
   EXPECT_EQ(events[2].value, std::string("a\"b\\c/d\ne\tf"));
 }
 
-TEST(StreamingJsonParser, UnicodeEscapePassthrough) {
-  auto events = parse(R"({"u": "\u0041\u0042"})");
+TEST(StreamingJsonParser, UnicodeEscapesDecodeToUtf8) {
+  // \uXXXX decodes to UTF-8, including surrogate pairs. Historically these
+  // passed through literally; that silently corrupted any consumer handling
+  // real text (Readwise titles and bodies), so decoding is now unconditional.
+  auto events = parse(R"({"u": "\u0041\u00e9\u65e5\ud83d\ude00"})");
 
   ASSERT_EQ(events.size(), 4u);
   EXPECT_EQ(events[2].type, EventType::STRING);
-  // \uXXXX passed through as literal \u followed by the hex digits
-  EXPECT_EQ(events[2].value, "\\u0041\\u0042");
+  EXPECT_EQ(events[2].value, "A\xC3\xA9\xE6\x97\xA5\xF0\x9F\x98\x80");
+}
+
+TEST(StreamingJsonParser, LoneSurrogateDecodesToReplacementCharacter) {
+  auto events = parse(R"({"u": "x\ud800y"})");
+  ASSERT_EQ(events.size(), 4u);
+  EXPECT_EQ(events[2].value, "x\xEF\xBF\xBDy");
 }
 
 TEST(StreamingJsonParser, Numbers) {

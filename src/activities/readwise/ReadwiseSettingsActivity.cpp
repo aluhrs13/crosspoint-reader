@@ -6,6 +6,7 @@
 #include <WiFi.h>
 
 #include "ReadwiseCredentialStore.h"
+#include "ReadwiseSupport.h"
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -139,7 +140,8 @@ void ReadwiseSettingsActivity::testConnection() {
     authState = AuthState::OK;
   } else {
     authState = AuthState::FAILED;
-    authDetail = readwise::apiStatusName(status);
+    authDetail = I18N.get(ReadwiseUi::statusStrId(status));
+    LOG_ERR("RWSET", "Auth test failed: %s", readwise::apiStatusName(status));
   }
   requestUpdate();
 }
@@ -174,7 +176,7 @@ void ReadwiseSettingsActivity::render(RenderLock&&) {
             case AuthState::OK:
               return tr(STR_READWISE_AUTH_OK);
             case AuthState::FAILED:
-              return std::string(tr(STR_READWISE_AUTH_FAILED)) + ": " + authDetail;
+              return authDetail;
           }
           return "";
         }

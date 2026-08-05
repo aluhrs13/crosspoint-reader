@@ -14,6 +14,9 @@ void StreamingJsonParser::reset() {
   nestingDepth = 0;
   literalLen = 0;
   literalPos = 0;
+  unicodeDigits = 0;
+  unicodeValue = 0;
+  pendingSurrogate = 0;
 }
 
 void StreamingJsonParser::feed(const char* data, size_t len) {
@@ -123,8 +126,18 @@ void StreamingJsonParser::handleScanning(char c) {
 }
 
 void StreamingJsonParser::handleStringChar(char c) {
+  if (unicodeDigits > 0) {
+    handleUnicodeHexDigit(c);
+    return;
+  }
+
   if (escaped) {
     escaped = false;
+    // Any decoded escape other than the second half of a surrogate pair means
+    // a pending high surrogate was unpaired.
+    if (c != 'u') {
+      flushPendingSurrogate();
+    }
     switch (c) {
       case '"':
       case '\\':
@@ -147,10 +160,10 @@ void StreamingJsonParser::handleStringChar(char c) {
         appendToken('\t');
         break;
       case 'u':
-        // Pass \uXXXX through as literal characters -- we don't decode
-        // Unicode escapes since our use case only needs ASCII field matching.
-        appendToken('\\');
-        appendToken('u');
+        // Begin collecting the four hex digits. Decoded incrementally so a
+        // chunk boundary can land anywhere inside the escape.
+        unicodeDigits = 1;
+        unicodeValue = 0;
         break;
       default:
         appendToken('\\');
@@ -165,12 +178,81 @@ void StreamingJsonParser::handleStringChar(char c) {
     return;
   }
 
+  flushPendingSurrogate();
+
   if (c == '"') {
     emitToken();
     return;
   }
 
   appendToken(c);
+}
+
+void StreamingJsonParser::handleUnicodeHexDigit(char c) {
+  uint32_t digit;
+  if (c >= '0' && c <= '9') {
+    digit = static_cast<uint32_t>(c - '0');
+  } else if (c >= 'a' && c <= 'f') {
+    digit = static_cast<uint32_t>(c - 'a' + 10);
+  } else if (c >= 'A' && c <= 'F') {
+    digit = static_cast<uint32_t>(c - 'A' + 10);
+  } else {
+    // Malformed escape: JSON guarantees four hex digits.
+    error = true;
+    return;
+  }
+  unicodeValue = (unicodeValue << 4) | digit;
+  if (++unicodeDigits <= 4) {
+    return;
+  }
+  unicodeDigits = 0;
+
+  const uint32_t value = unicodeValue;
+  if (value >= 0xD800 && value <= 0xDBFF) {
+    // High surrogate: hold it for the immediately-following low half. If one
+    // is already pending, it was unpaired.
+    flushPendingSurrogate();
+    pendingSurrogate = value;
+    return;
+  }
+  if (value >= 0xDC00 && value <= 0xDFFF) {
+    if (pendingSurrogate != 0) {
+      const uint32_t codepoint = 0x10000 + ((pendingSurrogate - 0xD800) << 10) + (value - 0xDC00);
+      pendingSurrogate = 0;
+      emitCodepoint(codepoint);
+    } else {
+      // Lone low surrogate.
+      emitCodepoint(0xFFFD);
+    }
+    return;
+  }
+  flushPendingSurrogate();
+  emitCodepoint(value);
+}
+
+void StreamingJsonParser::flushPendingSurrogate() {
+  if (pendingSurrogate != 0) {
+    pendingSurrogate = 0;
+    emitCodepoint(0xFFFD);
+  }
+}
+
+void StreamingJsonParser::emitCodepoint(uint32_t codepoint) {
+  if (codepoint < 0x80) {
+    appendToken(static_cast<char>(codepoint));
+  } else if (codepoint < 0x800) {
+    appendToken(static_cast<char>(0xC0 | (codepoint >> 6)));
+    appendToken(static_cast<char>(0x80 | (codepoint & 0x3F)));
+  } else if (codepoint < 0x10000) {
+    appendToken(static_cast<char>(0xE0 | (codepoint >> 12)));
+    appendToken(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+    appendToken(static_cast<char>(0x80 | (codepoint & 0x3F)));
+  } else {
+    appendToken(static_cast<char>(0xF0 | (codepoint >> 18)));
+    appendToken(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+    appendToken(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+    appendToken(static_cast<char>(0x80 | (codepoint & 0x3F)));
+  }
 }
 
 void StreamingJsonParser::handleNumber(char c) {

@@ -73,6 +73,10 @@ class StreamingJsonParser {
   bool streamingValues() const { return cb.onStringChunk != nullptr && cb.onStringEnd != nullptr; }
   void flushValueChunk();
 
+  void handleUnicodeHexDigit(char c);
+  void emitCodepoint(uint32_t codepoint);
+  void flushPendingSurrogate();
+
   bool inArray() const { return nestingDepth > 0 && nestingStack[nestingDepth - 1] == Container::ARRAY; }
 
   JsonCallbacks cb;
@@ -90,4 +94,12 @@ class StreamingJsonParser {
   char literalExpected[6];
   uint8_t literalLen;
   uint8_t literalPos;
+
+  // \uXXXX escape decoding, incremental so a chunk boundary can land anywhere
+  // inside the six escape characters. `unicodeDigits` > 0 while collecting hex;
+  // `pendingSurrogate` holds a high surrogate awaiting its low half. An
+  // unpaired surrogate decodes to U+FFFD rather than corrupting the stream.
+  uint8_t unicodeDigits;
+  uint32_t unicodeValue;
+  uint32_t pendingSurrogate;
 };

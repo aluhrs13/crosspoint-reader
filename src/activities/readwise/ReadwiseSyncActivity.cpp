@@ -11,6 +11,7 @@
 #include <cstdio>
 
 #include "ReadwiseCredentialStore.h"
+#include "ReadwiseSupport.h"
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -89,20 +90,8 @@ void ReadwiseSyncActivity::performSync() {
     pulled = outcome.pulled;
   } else {
     state = State::FAILED;
-    switch (outcome.status) {
-      case readwise::ApiStatus::AuthFailed:
-        statusMessage = tr(STR_READWISE_AUTH_FAILED);
-        break;
-      case readwise::ApiStatus::RateLimited:
-        statusMessage = tr(STR_READWISE_RATE_LIMITED);
-        break;
-      case readwise::ApiStatus::LowMemory:
-        statusMessage = tr(STR_READWISE_LOW_MEMORY);
-        break;
-      default:
-        statusMessage = tr(STR_READWISE_SYNC_FAILED);
-        break;
-    }
+    statusMessage = outcome.status == readwise::ApiStatus::Ok ? tr(STR_READWISE_SYNC_FAILED)
+                                                              : I18N.get(ReadwiseUi::statusStrId(outcome.status));
     LOG_ERR("RWSYNC", "Sync failed: stage=%u status=%s", static_cast<unsigned>(outcome.failedStage),
             readwise::apiStatusName(outcome.status));
   }

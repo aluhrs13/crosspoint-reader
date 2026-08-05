@@ -1,5 +1,8 @@
 #pragma once
 
+#include <I18n.h>
+#include <ReadwiseApi.h>
+
 #include <string>
 
 // Shared helpers for the Readwise activities: the mapping between document ids
@@ -21,5 +24,9 @@ std::string idFromBodyPath(const std::string& path);
 // Looks the document up in docs.bin and returns its title, or the id itself
 // when the metadata is gone (e.g. the cache was cleared under us).
 std::string titleForBodyPath(const std::string& path);
+
+// Translation key for a client status. All user-facing failure text goes
+// through this; readwise::apiStatusName() stays log-only English.
+StrId statusStrId(readwise::ApiStatus status);
 
 }  // namespace ReadwiseUi

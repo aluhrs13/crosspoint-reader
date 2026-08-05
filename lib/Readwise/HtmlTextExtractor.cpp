@@ -144,11 +144,15 @@ bool HtmlTextExtractor::consume(char c) {
         closingTag_ = true;
         return true;
       }
-      if (c == '!' || c == '?') {
-        // "<!--", "<!doctype", "<?xml" -- treated as comment-like: skipped.
-        // Real comments need "-->" termination; doctype/PI end at '>'.
-        state_ = State::COMMENT;
+      if (c == '!') {
+        // "<!--" opens a comment (ends only at "-->"); anything else after
+        // "<!" is a declaration ending at the first '>'.
+        state_ = State::MARKUP_OPEN;
         commentDashes_ = 0;
+        return true;
+      }
+      if (c == '?') {
+        state_ = State::DECLARATION;
         return true;
       }
       state_ = State::TAG_NAME;
@@ -206,20 +210,39 @@ bool HtmlTextExtractor::consume(char c) {
       entity_[entityLen_++] = c;
       return true;
 
+    case State::MARKUP_OPEN:
+      // Counting the opening dashes of "<!--". Two make it a comment; any
+      // other character makes it a declaration (reprocessed there, since '>'
+      // may already be that character: "<!>").
+      if (c == '-') {
+        if (++commentDashes_ == 2) {
+          state_ = State::COMMENT;
+          commentDashes_ = 0;
+        }
+        return true;
+      }
+      state_ = State::DECLARATION;
+      return consume(c);
+
     case State::COMMENT:
-      // Handles both "<!-- -->" comments and single-'>' constructs like
-      // doctype. For a real comment, require the "--" run before '>'.
+      // A real comment ends only at "-->": a bare '>' inside it is content.
       if (c == '-') {
         if (commentDashes_ < 2) {
           ++commentDashes_;
         }
         return true;
       }
-      if (c == '>') {
+      if (c == '>' && commentDashes_ >= 2) {
         state_ = State::TEXT;
         return true;
       }
       commentDashes_ = 0;
+      return true;
+
+    case State::DECLARATION:
+      if (c == '>') {
+        state_ = State::TEXT;
+      }
       return true;
 
     case State::RAWTEXT:

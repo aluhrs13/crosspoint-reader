@@ -32,6 +32,7 @@ void ReadwiseListParser::reset() {
   malformed = false;
   sawCursorKey = false;
   envelopeOpen = false;
+  envelopeClosed = false;
   doc.clear();
   fieldLen = 0;
   fieldTruncated = false;
@@ -112,6 +113,8 @@ void ReadwiseListParser::onKey(const char* key, size_t len) {
       lastKey = LastKey::CATEGORY;
     else if (keyIs(key, len, "reading_progress"))
       lastKey = LastKey::READING_PROGRESS;
+    else if (keyIs(key, len, "first_opened_at"))
+      lastKey = LastKey::FIRST_OPENED_AT;
     else if (keyIs(key, len, "html_content"))
       lastKey = LastKey::HTML_CONTENT;
   }
@@ -149,13 +152,15 @@ void ReadwiseListParser::onStringEnd() {
   if (skipDepth > 0) {
     return;
   }
-  if (inBody) {
+  // html_content ends here whether or not any chunk arrived: an empty string
+  // is zero chunks followed by the end marker, and the sink must still see
+  // onBodyEnd(true) so an empty article commits rather than reading as a
+  // failed transfer.
+  if (lastKey == LastKey::HTML_CONTENT && position == Position::IN_DOCUMENT) {
     inBody = false;
-    if (bodySink != nullptr && bodyOpen) {
-      bodyOpen = false;
-      if (!bodySink->onBodyEnd(true)) {
-        aborted = true;
-      }
+    bodyOpen = false;
+    if (bodySink != nullptr && !bodySink->onBodyEnd(true)) {
+      aborted = true;
     }
     lastKey = LastKey::NONE;
     return;
@@ -201,6 +206,14 @@ void ReadwiseListParser::dispatchField() {
       break;
     case LastKey::LAST_MOVED_AT:
       copyBounded(doc.lastMovedAt, TIMESTAMP_CAP, fieldBuf, fieldLen);
+      break;
+    case LastKey::FIRST_OPENED_AT:
+      // A non-null first_opened_at means the server already considers this
+      // document seen; without this, every open would queue a redundant
+      // `seen` push. Null leaves the flag clear (onNull skips dispatch).
+      if (fieldLen > 0) {
+        doc.flags |= FLAG_SEEN;
+      }
       break;
     case LastKey::LOCATION:
       doc.location = parseLocation(fieldBuf, fieldLen);
@@ -274,9 +287,17 @@ void ReadwiseListParser::onObjectEnd() {
     --skipDepth;
     return;
   }
+  if (position == Position::TOP_LEVEL && envelopeOpen) {
+    envelopeClosed = true;
+    lastKey = LastKey::NONE;
+    return;
+  }
   if (position == Position::IN_DOCUMENT) {
-    // A document without an id is malformed input, not a deliverable record.
-    if (doc.id[0] == '\0') {
+    // A document without an id is malformed input, not a deliverable record --
+    // and an id that is not ULID-shaped must be refused outright, because ids
+    // become SD paths (bodies/<id>.txt) and the accepted unverified-TLS
+    // posture means response data is not beyond an active attacker.
+    if (!isValidDocumentId(doc.id)) {
       malformed = true;
       return;
     }

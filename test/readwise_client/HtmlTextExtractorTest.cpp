@@ -112,6 +112,20 @@ TEST(HtmlTextExtractor, AbortingSinkStopsProcessing) {
   EXPECT_FALSE(ok && extractor.finish());
 }
 
+// Real comments end at "-->", not at the first '>' -- a '>' inside must not
+// leak the remainder into the article text. Declarations still end at '>'.
+TEST(HtmlTextExtractor, CommentsRequireDashDashTerminator) {
+  EXPECT_EQ(convert("<p>a</p><!-- x > hidden --><p>b</p>"), "a\n\nb\n");
+  EXPECT_EQ(convert("<!doctype html><p>c</p>"), "c\n");
+  EXPECT_EQ(convert("<p>d</p><!-- multi - dash -- not done --><p>e</p>"), "d\n\ne\n");
+  // Chunk-invariant with the '>' inside the comment.
+  const std::string html = "<p>a</p><!-- x > hidden --><p>b</p>";
+  const std::string whole = convert(html);
+  for (size_t chunkSize : {size_t{1}, size_t{3}}) {
+    EXPECT_EQ(convert(html, chunkSize), whole);
+  }
+}
+
 TEST(HtmlTextExtractor, UnterminatedEntityAtEofEmitsLiterally) {
   EXPECT_EQ(convert("<p>broken &am</p>x &gt"), "broken &am\n\nx &gt\n");
 }

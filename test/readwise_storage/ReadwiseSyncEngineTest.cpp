@@ -349,6 +349,51 @@ TEST(ReadwiseSync, RebuildLocalReflectsQueuedActionsOffline) {
   EXPECT_EQ(reloaded.entries().size(), 1u);
 }
 
+// Ordinary navigation must not rewrite the cache: an empty journal makes
+// rebuildLocal a no-op with zero durable writes.
+TEST(ReadwiseSync, RebuildLocalWithEmptyJournalWritesNothing) {
+  Fixture f;
+  f.api.pages.push_back({{makeDoc("doc1", Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  const int writesBefore = f.store.writeCount();
+  ASSERT_TRUE(f.engine.rebuildLocal());
+  EXPECT_EQ(f.store.writeCount(), writesBefore) << "a no-op rebuild must not touch the SD card";
+}
+
+// Without persisting FLAG_HAS_BODY, a downloaded article would show as "not
+// downloaded" after the post-download restart and be fetched again.
+TEST(ReadwiseSync, SetBodyCachedPersistsAcrossReload) {
+  Fixture f;
+  f.api.pages.push_back(
+      {{makeDoc("doc1", Location::Later, kT1, kT1), makeDoc("doc2", Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_TRUE(f.engine.setBodyCached("doc1", true));
+
+  // A fresh engine over the same store simulates the restart.
+  ReadwiseSyncEngine reloaded(f.api, f.store, kBase);
+  Document doc;
+  ASSERT_TRUE(reloaded.findDocument("doc1", doc));
+  EXPECT_TRUE(doc.flags & FLAG_HAS_BODY);
+  ASSERT_TRUE(reloaded.findDocument("doc2", doc));
+  EXPECT_FALSE(doc.flags & FLAG_HAS_BODY) << "only the patched record may change";
+
+  // And the index-read path sees it too.
+  std::vector<Document> page;
+  ASSERT_TRUE(reloaded.readIndexPage(Location::Later, 0, 10, page));
+  bool found = false;
+  for (const Document& d : page) {
+    if (std::string(d.id) == "doc1") {
+      found = true;
+      EXPECT_TRUE(d.flags & FLAG_HAS_BODY);
+    }
+  }
+  EXPECT_TRUE(found);
+
+  EXPECT_FALSE(f.engine.setBodyCached("missing", true));
+}
+
 TEST(ReadwiseSync, FindDocumentById) {
   Fixture f;
   f.api.pages.push_back(

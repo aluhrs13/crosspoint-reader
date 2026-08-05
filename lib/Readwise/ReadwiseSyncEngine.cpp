@@ -569,6 +569,12 @@ bool ReadwiseSyncEngine::rebuildLocal() {
   if (!journal_.load()) {
     return false;
   }
+  // The library calls this on every entry; with nothing queued there is
+  // nothing to apply, and a full docs.bin + index rewrite would be pure SD
+  // wear on ordinary navigation.
+  if (journal_.empty()) {
+    return true;
+  }
   // No staged documents: everything carries over from the existing docs.bin,
   // and the carry-over path applies the queued overrides and body eviction.
   std::vector<IndexEntry> indexEntries;
@@ -603,6 +609,45 @@ bool ReadwiseSyncEngine::findDocument(const char* id, Document& out) {
     if (sameId(scratchDoc_.id, id)) {
       out = scratchDoc_;
       return true;
+    }
+    offset += static_cast<uint32_t>(consumed);
+  }
+  return false;
+}
+
+bool ReadwiseSyncEngine::setBodyCached(const char* id, bool cached) {
+  if (id == nullptr || id[0] == '\0') {
+    return false;
+  }
+  DocsHeader header;
+  uint8_t headerBuffer[DOCS_HEADER_SIZE];
+  if (store_.readRange(docsPath(), 0, headerBuffer, DOCS_HEADER_SIZE) != static_cast<int>(DOCS_HEADER_SIZE) ||
+      !decodeDocsHeader(headerBuffer, DOCS_HEADER_SIZE, header)) {
+    return false;
+  }
+  uint32_t offset = DOCS_HEADER_SIZE;
+  for (uint16_t i = 0; i < header.recordCount; ++i) {
+    const int read = store_.readRange(docsPath(), offset, recordBuffer_, MAX_ENCODED_RECORD);
+    if (read <= 0) {
+      return false;
+    }
+    size_t consumed = 0;
+    if (!decodeDocument(recordBuffer_, static_cast<size_t>(read), scratchDoc_, &consumed)) {
+      return false;
+    }
+    if (sameId(scratchDoc_.id, id)) {
+      uint8_t flags = scratchDoc_.flags;
+      if (cached) {
+        flags |= FLAG_HAS_BODY;
+      } else {
+        flags &= static_cast<uint8_t>(~FLAG_HAS_BODY);
+      }
+      if (flags == scratchDoc_.flags) {
+        return true;
+      }
+      // The flags byte is the final byte of the encoded record.
+      const size_t flagsOffset = offset + consumed - 1;
+      return store_.writeRange(docsPath(), flagsOffset, &flags, 1);
     }
     offset += static_cast<uint32_t>(consumed);
   }

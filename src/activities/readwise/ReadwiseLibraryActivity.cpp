@@ -32,6 +32,9 @@ constexpr readwise::Location ReadwiseLibraryActivity::LOCATIONS[];
 void ReadwiseLibraryActivity::onEnter() {
   Activity::onEnter();
   engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(nullApi, store, ReadwiseCredentialStore::getDataDir());
+  if (!engine) {
+    LOG_ERR("RWLIB", "OOM: sync engine; library will show empty");
+  }
   if (engine) {
     engine->setDocumentCap(READWISE_STORE.getDocumentCap());
     // Reflect any actions queued in a previous session that a failed sync
@@ -191,15 +194,16 @@ void ReadwiseLibraryActivity::openDocument(const readwise::Document& doc) {
   if (engine == nullptr) {
     return;
   }
-  // Mirror Readwise's first_opened semantics: the first open queues `seen`.
-  if ((doc.flags & readwise::FLAG_SEEN) == 0) {
-    engine->queueSeen(doc.id, doc.updatedAt);
-  }
-
   const std::string bodyPath = ReadwiseUi::bodyPathForId(doc.id);
-  if ((doc.flags & readwise::FLAG_HAS_BODY) != 0 && store.exists(bodyPath)) {
-    // Cached: open offline. ReaderActivity recognizes the managed path and
-    // routes Back to this library.
+  if (!bodyPath.empty() && (doc.flags & readwise::FLAG_HAS_BODY) != 0 && store.exists(bodyPath)) {
+    // Cached: open offline. `seen` queues only on an open that actually
+    // happens -- never on a cancelled Wi-Fi picker or a failed download --
+    // and only when the server does not already report the document opened
+    // (first_opened_at parses into FLAG_SEEN).
+    if ((doc.flags & readwise::FLAG_SEEN) == 0) {
+      engine->queueSeen(doc.id, doc.updatedAt);
+    }
+    // ReaderActivity recognizes the managed path and routes Back here.
     activityManager.goToReader(bodyPath);
     return;
   }
@@ -209,6 +213,8 @@ void ReadwiseLibraryActivity::openDocument(const readwise::Document& doc) {
 void ReadwiseLibraryActivity::startDownload(const readwise::Document& doc) {
   pendingDownloadId = doc.id;
   pendingDownloadTitle = doc.title;
+  pendingDownloadRev = doc.updatedAt;
+  pendingDownloadSeen = (doc.flags & readwise::FLAG_SEEN) != 0;
   if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
     performDownload();
     return;
@@ -235,19 +241,34 @@ void ReadwiseLibraryActivity::performDownload() {
 
   const std::string bodyPath = ReadwiseUi::bodyPathForId(pendingDownloadId.c_str());
   readwise::ApiStatus status = readwise::ApiStatus::LowMemory;
-  {
+  if (!bodyPath.empty()) {
     readwise::HttpReadwiseApi api(READWISE_STORE.getToken());
-    readwise::BodyTextWriter writer(store, bodyPath);
-    uint16_t retryAfter = 0;
-    status = api.fetchBody(pendingDownloadId.c_str(), writer, &retryAfter);
-    if (status == readwise::ApiStatus::Ok && !writer.committed()) {
-      // A 200 whose body never arrived (document without html_content).
-      status = readwise::ApiStatus::ParseError;
+    // The writer carries the extractor's output buffer (~400 bytes of state)
+    // and sits under a live TLS session -- heap, not the main-loop stack.
+    auto writer = makeUniqueNoThrow<readwise::BodyTextWriter>(store, bodyPath);
+    if (!writer) {
+      LOG_ERR("RWLIB", "OOM: body writer");
+    } else {
+      uint16_t retryAfter = 0;
+      status = api.fetchBody(pendingDownloadId.c_str(), *writer, &retryAfter);
+      if (status == readwise::ApiStatus::Ok && !writer->committed()) {
+        // A 200 whose body never arrived (document without html_content).
+        status = readwise::ApiStatus::ParseError;
+      }
     }
   }
 
   if (status == readwise::ApiStatus::Ok) {
-    // Persist the body flag so the next session opens offline.
+    // Persist the body flag in docs.bin, or the restart below would show the
+    // article as not downloaded and fetch it again on reopen.
+    if (engine) {
+      engine->setBodyCached(pendingDownloadId.c_str(), true);
+      // The download succeeded, so this open is real: queue `seen` now unless
+      // the server already reported the document opened.
+      if (!pendingDownloadSeen) {
+        engine->queueSeen(pendingDownloadId.c_str(), pendingDownloadRev.c_str());
+      }
+    }
     APP_STATE.openEpubPath = bodyPath;
     APP_STATE.saveToFile();
     // The WiFi/TLS session just fragmented the heap the reader needs; the
@@ -262,8 +283,9 @@ void ReadwiseLibraryActivity::performDownload() {
   {
     RenderLock lock(*this);
     state = State::DOWNLOAD_FAILED;
-    statusMessage = readwise::apiStatusName(status);
+    statusMessage = I18N.get(ReadwiseUi::statusStrId(status));
   }
+  LOG_ERR("RWLIB", "Download failed: %s", readwise::apiStatusName(status));
   requestUpdate();
 }
 
@@ -287,7 +309,7 @@ void ReadwiseLibraryActivity::render(RenderLock&&) {
   const auto pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect headerRect{0, metrics.topPadding, pageWidth, metrics.headerHeight};
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), "<", ">");
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
 
   if (state == State::DOWNLOADING) {
     GUI.drawHeader(renderer, headerRect, tr(STR_READWISE_LIBRARY));

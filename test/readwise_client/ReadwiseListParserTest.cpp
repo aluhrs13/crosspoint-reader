@@ -165,6 +165,105 @@ TEST(ReadwiseListParser, EscapedCharactersDecode) {
   EXPECT_STREQ(docs.docs[0].title, "Line\none \"quoted\" back\\slash");
 }
 
+TEST(ReadwiseListParser, UnicodeEscapesDecode) {
+  // The live API escapes non-ASCII as \uXXXX; these must decode to UTF-8,
+  // including surrogate pairs, across arbitrary chunk boundaries.
+  const std::string json =
+      "{\"count\": 1, \"nextPageCursor\": null, \"results\": [{"
+      "\"id\": \"01hzzzzzzzzzzzzzzzzzzzzz46\","
+      "\"title\": \"\\u65e5\\u672c\\u8a9e \\ud83d\\ude00 done\", \"location\": \"later\"}]}";
+  for (size_t chunkSize : {json.size(), size_t{1}, size_t{5}}) {
+    CollectingDocSink docs;
+    ReadwiseListParser parser(docs, nullptr);
+    ASSERT_TRUE(feedChunked(parser, json, chunkSize));
+    ASSERT_EQ(docs.docs.size(), 1u);
+    EXPECT_STREQ(docs.docs[0].title, "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E \xF0\x9F\x98\x80 done")
+        << "chunk size " << chunkSize;
+  }
+}
+
+TEST(ReadwiseListParser, LoneSurrogateBecomesReplacementCharacter) {
+  const std::string json =
+      "{\"count\": 1, \"nextPageCursor\": null, \"results\": [{"
+      "\"id\": \"01hzzzzzzzzzzzzzzzzzzzzz47\", \"title\": \"a\\ud800b\", \"location\": \"new\"}]}";
+  CollectingDocSink docs;
+  ReadwiseListParser parser(docs, nullptr);
+  ASSERT_TRUE(feedChunked(parser, json, 4));
+  ASSERT_EQ(docs.docs.size(), 1u);
+  EXPECT_STREQ(docs.docs[0].title,
+               "a\xEF\xBF\xBD"
+               "b");
+}
+
+// An empty html_content is zero chunks then the end marker; the body sink must
+// still see onBodyEnd(true), or an empty article reads as a failed transfer.
+TEST(ReadwiseListParser, EmptyHtmlContentStillEndsTheBody) {
+  const std::string json =
+      "{\"count\": 1, \"nextPageCursor\": null, \"results\": [{"
+      "\"id\": \"01hzzzzzzzzzzzzzzzzzzzzz48\", \"html_content\": \"\", \"location\": \"later\"}]}";
+  CollectingDocSink docs;
+  CollectingBodySink body;
+  ReadwiseListParser parser(docs, &body);
+  ASSERT_TRUE(feedChunked(parser, json, 8));
+  EXPECT_EQ(body.endCalls, 1);
+  EXPECT_TRUE(body.complete);
+  EXPECT_TRUE(body.body.empty());
+}
+
+// A fully-framed transfer whose JSON was cut short parses without error but
+// never closes the envelope; complete() is what the client checks.
+TEST(ReadwiseListParser, TruncatedJsonIsNotComplete) {
+  const std::string json = loadFixture("list_normal.json");
+  CollectingDocSink docs;
+  ReadwiseListParser parser(docs, nullptr);
+  parser.feed(json.data(), json.size() - 5);
+  EXPECT_FALSE(parser.complete());
+
+  CollectingDocSink docs2;
+  ReadwiseListParser parser2(docs2, nullptr);
+  ASSERT_TRUE(feedChunked(parser2, json, 64));
+  EXPECT_TRUE(parser2.complete());
+}
+
+// first_opened_at drives FLAG_SEEN so the UI never queues a redundant `seen`
+// for a document the server already reports opened.
+TEST(ReadwiseListParser, FirstOpenedAtSetsSeenFlag) {
+  const std::string opened =
+      "{\"count\": 1, \"nextPageCursor\": null, \"results\": [{"
+      "\"id\": \"01hzzzzzzzzzzzzzzzzzzzzz49\","
+      "\"first_opened_at\": \"2026-08-05T03:15:27.278000+00:00\", \"location\": \"later\"}]}";
+  CollectingDocSink docs;
+  ReadwiseListParser parser(docs, nullptr);
+  ASSERT_TRUE(feedChunked(parser, opened, 16));
+  ASSERT_EQ(docs.docs.size(), 1u);
+  EXPECT_TRUE(docs.docs[0].flags & FLAG_SEEN);
+
+  const std::string unopened =
+      "{\"count\": 1, \"nextPageCursor\": null, \"results\": [{"
+      "\"id\": \"01hzzzzzzzzzzzzzzzzzzzzz4a\", \"first_opened_at\": null, \"location\": \"later\"}]}";
+  CollectingDocSink docs2;
+  ReadwiseListParser parser2(docs2, nullptr);
+  ASSERT_TRUE(feedChunked(parser2, unopened, 16));
+  ASSERT_EQ(docs2.docs.size(), 1u);
+  EXPECT_FALSE(docs2.docs[0].flags & FLAG_SEEN);
+}
+
+// Ids become SD paths (bodies/<id>.txt); anything not ULID-shaped is refused
+// before it can carry path syntax.
+TEST(ReadwiseListParser, HostileDocumentIdIsRejected) {
+  for (const char* bad : {"../../settings", "a/b", "..", "ABCDEF0123456789ABCDEF0123", ""}) {
+    const std::string json = std::string(
+                                 "{\"count\": 1, \"nextPageCursor\": null, \"results\": [{"
+                                 "\"id\": \"") +
+                             bad + "\", \"location\": \"later\"}]}";
+    CollectingDocSink docs;
+    ReadwiseListParser parser(docs, nullptr);
+    feedChunked(parser, json, 16);
+    EXPECT_TRUE(parser.hasError()) << "accepted id: " << bad;
+    EXPECT_EQ(docs.docs.size(), 0u) << "delivered doc with id: " << bad;
+  }
+}
+
 TEST(ReadwiseListParser, MalformedJsonReportsErrorNotDelivery) {
   // A document with no id is refused.
   const std::string noId = "{\"count\": 1, \"results\": [{\"title\": \"orphan\"}]}";

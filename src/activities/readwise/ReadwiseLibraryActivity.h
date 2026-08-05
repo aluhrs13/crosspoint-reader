@@ -72,6 +72,8 @@ class ReadwiseLibraryActivity final : public Activity {
   // Set when a download is pending/failed; the id of the document involved.
   std::string pendingDownloadId;
   std::string pendingDownloadTitle;
+  std::string pendingDownloadRev;
+  bool pendingDownloadSeen = false;
   std::string statusMessage;
   bool wifiActivated = false;
 };

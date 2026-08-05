@@ -19,6 +19,7 @@ class SdReadwiseFileStore : public ReadwiseFileStore {
  public:
   bool writeAll(const std::string& path, const uint8_t* data, size_t len) override;
   int readRange(const std::string& path, size_t offset, uint8_t* buf, size_t bufCap) override;
+  bool writeRange(const std::string& path, size_t offset, const uint8_t* data, size_t len) override;
   bool exists(const std::string& path) override;
   bool remove(const std::string& path) override;
   long size(const std::string& path) override;

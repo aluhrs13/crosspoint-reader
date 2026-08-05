@@ -109,6 +109,18 @@ TEST(ReadwiseClientCore, RetryAfterParsing) {
   EXPECT_EQ(parseRetryAfter("soon"), 0);
   EXPECT_EQ(parseRetryAfter("-5"), 0);
   EXPECT_EQ(parseRetryAfter("999999"), 0) << "an implausible value reads as no guidance";
+  EXPECT_EQ(parseRetryAfter("16junk"), 0) << "trailing junk means the value cannot be trusted";
+  EXPECT_EQ(parseRetryAfter("16 "), 0);
+}
+
+TEST(ReadwiseClientCore, DocumentIdValidation) {
+  EXPECT_TRUE(isValidDocumentId("01hzzzzzzzzzzzzzzzzzzzzz00"));
+  EXPECT_FALSE(isValidDocumentId(nullptr));
+  EXPECT_FALSE(isValidDocumentId(""));
+  EXPECT_FALSE(isValidDocumentId("../../settings"));
+  EXPECT_FALSE(isValidDocumentId("a/b"));
+  EXPECT_FALSE(isValidDocumentId("UPPERCASE0123456789012345"));
+  EXPECT_FALSE(isValidDocumentId("short"));
 }
 
 // --- BodyTextWriter -------------------------------------------------------

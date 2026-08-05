@@ -48,6 +48,15 @@ class FakeFileStore : public readwise::ReadwiseFileStore {
     return static_cast<int>(toCopy);
   }
 
+  bool writeRange(const std::string& path, size_t offset, const uint8_t* data, size_t len) override {
+    auto it = files_.find(path);
+    if (it == files_.end() || offset + len > it->second.size()) {
+      return false;
+    }
+    memcpy(it->second.data() + offset, data, len);
+    return true;
+  }
+
   bool exists(const std::string& path) override { return files_.count(path) != 0; }
 
   bool remove(const std::string& path) override { return files_.erase(path) != 0; }
@@ -189,7 +198,11 @@ class FakeApi : public readwise::ReadwiseApi {
     if (!sink.onBodyChunk(body.data() + half, body.size() - half)) {
       return readwise::ApiStatus::ParseError;
     }
-    sink.onBodyEnd(true);
+    if (!sink.onBodyEnd(true)) {
+      // Mirror the production contract: a sink that refuses the commit turns
+      // the transfer into a parse failure.
+      return readwise::ApiStatus::ParseError;
+    }
     return readwise::ApiStatus::Ok;
   }
 

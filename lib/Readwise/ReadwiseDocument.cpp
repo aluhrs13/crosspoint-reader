@@ -58,6 +58,25 @@ const char* locationName(Location location) {
   return "unknown";
 }
 
+bool isValidDocumentId(const char* id) {
+  if (id == nullptr || id[0] == '\0') {
+    return false;
+  }
+  size_t len = 0;
+  for (const char* p = id; *p != '\0'; ++p, ++len) {
+    const char c = *p;
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z'))) {
+      return false;
+    }
+    if (len >= ID_CAP) {
+      return false;
+    }
+  }
+  // Observed ids are exactly 26 chars; allow modest drift but nothing that
+  // could hide path syntax.
+  return len >= 10 && len <= ID_CAP - 1;
+}
+
 void copyBounded(char* dst, size_t dstCap, const char* src, size_t srcLen) {
   if (dst == nullptr || dstCap == 0) {
     return;

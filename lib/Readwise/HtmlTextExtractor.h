@@ -39,12 +39,15 @@ class HtmlTextExtractor {
  private:
   enum class State : uint8_t {
     TEXT,
-    TAG_OPEN,       // just saw '<'
-    TAG_NAME,       // collecting the element name
-    TAG_REST,       // inside the tag, waiting for '>'
-    TAG_QUOTE,      // inside a quoted attribute value
-    ENTITY,         // collecting an &...; reference
-    COMMENT,        // inside <!-- ... -->
+    TAG_OPEN,     // just saw '<'
+    TAG_NAME,     // collecting the element name
+    TAG_REST,     // inside the tag, waiting for '>'
+    TAG_QUOTE,    // inside a quoted attribute value
+    ENTITY,       // collecting an &...; reference
+    MARKUP_OPEN,  // saw "<!", deciding comment vs declaration
+    COMMENT,      // inside <!-- ... -->, ends only at "-->"
+    DECLARATION,  // <!doctype ...> or <?...>, ends at the first '>'
+
     RAWTEXT,        // inside script/style/template content
     RAWTEXT_MAYBE,  // saw '<' inside rawtext, matching against "</name"
   };

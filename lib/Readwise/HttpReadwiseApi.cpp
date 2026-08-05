@@ -121,11 +121,13 @@ ApiStatus HttpReadwiseApi::runListRequest(const char* url, DocumentSink& docSink
   if (mapped != ApiStatus::Ok) {
     return mapped;
   }
-  // A 200 whose body did not parse -- or arrived truncated (chunked framing
-  // incomplete) -- is a parse failure, not a success with fewer documents.
-  if (parser->hasError() || parser->wasAborted() || !http.responseComplete()) {
-    LOG_ERR("RWAPI", "List response invalid: parseError=%d aborted=%d complete=%d", parser->hasError(),
-            parser->wasAborted(), http.responseComplete());
+  // A 200 whose body did not parse, arrived truncated at the HTTP layer, or
+  // never closed its JSON envelope (fully framed but cut-short content) is a
+  // parse failure, not a success with fewer documents -- treating it as final
+  // could commit an incomplete page as a completed sweep.
+  if (parser->hasError() || parser->wasAborted() || !http.responseComplete() || !parser->complete()) {
+    LOG_ERR("RWAPI", "List response invalid: parseError=%d aborted=%d httpComplete=%d jsonComplete=%d",
+            parser->hasError(), parser->wasAborted(), http.responseComplete(), parser->complete());
     return ApiStatus::ParseError;
   }
   if (cursorOut != nullptr) {

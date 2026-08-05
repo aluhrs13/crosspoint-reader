@@ -40,6 +40,11 @@ class ReadwiseListParser {
 
   bool hasError() const { return parser.hasError() || malformed; }
   bool wasAborted() const { return aborted; }
+  // True once the response envelope's closing brace has been seen. A transfer
+  // whose HTTP framing completed but whose JSON was cut short parses without
+  // error yet never closes the envelope -- the client must treat that as a
+  // failed page, or a truncated response would commit as a complete sweep.
+  bool complete() const { return envelopeClosed && !hasError(); }
 
   // Response envelope. The cursor is empty on the final page; `count` saturates
   // at 10,000 server-side and must never signal completion.
@@ -69,6 +74,7 @@ class ReadwiseListParser {
     LOCATION,
     CATEGORY,
     READING_PROGRESS,
+    FIRST_OPENED_AT,
     HTML_CONTENT,
     COUNT,
     NEXT_PAGE_CURSOR,
@@ -116,6 +122,7 @@ class ReadwiseListParser {
   bool malformed = false;
   bool sawCursorKey = false;
   bool envelopeOpen = false;
+  bool envelopeClosed = false;
 
   Document doc;
   char fieldBuf[FIELD_CAP];
