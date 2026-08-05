@@ -1,0 +1,47 @@
+{
+  "_comment": "updatedAfter spanning a deletion. The deleted document is absent entirely - the API emits no tombstone.",
+  "before_delete": {
+    "count": 1,
+    "nextPageCursor": null,
+    "results": [
+      {
+        "id": "01hzzzzzzzzzzzzzzzzzzzzz200",
+        "url": "https://read.readwise.io/read/01hzzzzzzzzzzzzzzzzzzzzz200",
+        "title": "Lorem ipsum dolor sit am",
+        "author": "Lorem ipsum",
+        "source": "Lor",
+        "category": "article",
+        "location": "later",
+        "tags": {},
+        "site_name": "Lorem ipsum",
+        "word_count": 19,
+        "reading_time": "1 min",
+        "listening_time": null,
+        "created_at": "2026-08-05T03:16:00.352012+00:00",
+        "updated_at": "2026-08-05T03:16:03.324254+00:00",
+        "published_date": null,
+        "summary": "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et ",
+        "image_url": null,
+        "content": null,
+        "source_url": "https://example.com/path-segment/path-segment/p",
+        "notes": "",
+        "parent_id": null,
+        "reading_progress": 0,
+        "first_opened_at": "2026-08-05T03:16:03.319000+00:00",
+        "last_opened_at": "2026-08-05T03:16:03.319000+00:00",
+        "saved_at": "2026-08-05T03:16:00.336000+00:00",
+        "last_moved_at": "2026-08-05T03:16:03.050000+00:00"
+      }
+    ]
+  },
+  "after_delete": {
+    "count": 0,
+    "nextPageCursor": null,
+    "results": []
+  },
+  "by_deleted_id": {
+    "count": 0,
+    "nextPageCursor": null,
+    "results": []
+  }
+}

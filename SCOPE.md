@@ -58,6 +58,16 @@ If you are unsure whether your idea falls into one of these categories, open a D
 * **Active Connectivity:** No RSS readers, news aggregators, or web browsers. Background Wi-Fi drains the battery and complicates the single-core CPU. 
 * **PDF Rendering:** PDFs are fixed-layout documents, so rendering them requires displaying pages as images rather than reflowable text, resulting in constant panning and zooming that makes for a poor reading experience on e-ink. Out of scope on the current hardware class.
 
+### Fork-Specific Scope
+
+*This section applies to the `aluhrs13/crosspoint-reader` fork only. It does not change upstream's position on anything above, and nothing here should be proposed upstream.*
+
+* **Readwise Reader sync.** Upstream classifies new external network connectors as a temporarily closed area (see [Temporarily Closed Areas](#temporarily-closed-areas)), and that remains correct for upstream. This fork has deliberately diverged to add an offline Readwise Reader client.
+
+  Per [docs/contributing/upstream-sync.md](docs/contributing/upstream-sync.md), the implementation stays inside dedicated client, store, and activity modules with narrow hooks into shared CrossPoint code, so upstream merges remain tractable. The measured API contract and its limitations are recorded in [docs/readwise-api-contract.md](docs/readwise-api-contract.md).
+
+  The reading-experience test still applies within the fork: the feature is local-first and explicitly synchronized, it does not run background Wi-Fi, and it does not turn the device into an RSS aggregator.
+
 ## 5. Calls to Action
 
 These are the areas where contributor help is most valuable right now. If you want to take one of these on, open a Discussion or issue first so we can coordinate.

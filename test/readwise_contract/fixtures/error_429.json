@@ -1,0 +1,7 @@
+{
+  "_comment": "The retry-after header name is lowercase on the wire; header lookup must be case-insensitive.",
+  "retry_after_header": "16",
+  "body": {
+    "detail": "Request was throttled. Expected available in 16 seconds."
+  }
+}
