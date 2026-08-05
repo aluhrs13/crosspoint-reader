@@ -21,8 +21,9 @@
 #include "fontIds.h"
 
 namespace {
-// Confirm held this long queues an archive instead of opening.
-constexpr unsigned long ARCHIVE_HOLD_MS = 1200;
+// Confirm held this long queues an archive instead of opening. Matches the
+// reader's GO_HOME_MS long-press feel.
+constexpr unsigned long ARCHIVE_HOLD_MS = 1000;
 // One window of metadata; sized generously past a visible page.
 constexpr int WINDOW_SIZE = 32;
 }  // namespace
@@ -123,16 +124,27 @@ void ReadwiseLibraryActivity::loop() {
     return;
   }
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    const bool longPress = mappedInput.getHeldTime() >= ARCHIVE_HOLD_MS;
-    if (longPress && selectedIndex > 0) {
+  // Long-press Confirm archives, fired WHILE held -- the convention every
+  // other activity uses (see EpubReaderActivity's long-press menu function).
+  // Checking held time on release instead looked equivalent but never
+  // triggered in the hand.
+  if (mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
+    if (!archiveTriggered && selectedIndex > 0 && mappedInput.getHeldTime() >= ARCHIVE_HOLD_MS) {
       const readwise::Document* doc = docAt(selectedIndex - 1);
       if (doc != nullptr) {
+        archiveTriggered = true;  // suppress the release below
         queueArchive(*doc);
       }
-    } else {
-      activateSelection();
     }
+    return;
+  }
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    if (archiveTriggered) {
+      archiveTriggered = false;  // the hold already acted
+      return;
+    }
+    activateSelection();
     return;
   }
 

@@ -75,5 +75,8 @@ class ReadwiseLibraryActivity final : public Activity {
   std::string pendingDownloadRev;
   bool pendingDownloadSeen = false;
   std::string statusMessage;
+  // Set when a hold has already archived, so the following Confirm release
+  // does not also open the document.
+  bool archiveTriggered = false;
   bool wifiActivated = false;
 };
