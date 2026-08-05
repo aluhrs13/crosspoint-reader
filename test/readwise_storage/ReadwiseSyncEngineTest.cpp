@@ -433,8 +433,11 @@ TEST(ReadwiseSync, DownloadMissingBodiesFetchesOnlyMissing) {
   EXPECT_EQ(outcome.failed, 0);
   EXPECT_EQ(f.api.bodyFetches, 1) << "the cached document must not be re-fetched";
   EXPECT_TRUE(f.store.has(f.engine.bodyPath("doc1")));
-  ASSERT_EQ(rec.progress.size(), 1u);
-  EXPECT_EQ(rec.progress[0], (std::pair<uint16_t, uint16_t>{1, 1}));
+  // An upfront (0, total) call publishes the denominator before the first
+  // fetch, so the caller's popup opens at 0/N rather than 0/0.
+  ASSERT_EQ(rec.progress.size(), 2u);
+  EXPECT_EQ(rec.progress[0], (std::pair<uint16_t, uint16_t>{0, 1}));
+  EXPECT_EQ(rec.progress[1], (std::pair<uint16_t, uint16_t>{1, 1}));
 
   Document doc;
   ASSERT_TRUE(f.engine.findDocument("doc1", doc));

@@ -104,7 +104,10 @@ void ReadwiseSyncActivity::performSync() {
         self->bodiesDone = done;
         self->bodiesTotal = total;
       }
-      self->requestUpdate();
+      // Immediate: a deferred update only fires when loop() returns, and this
+      // whole pass runs blocking inside one loop() iteration -- deferring left
+      // the popup frozen at its initial 0/0 for the entire download.
+      self->requestUpdate(true);
     };
     hooks.sleepMs = [](void*, uint32_t ms) { delay(ms); };
     const auto bodies = engine->downloadMissingBodies(hooks);

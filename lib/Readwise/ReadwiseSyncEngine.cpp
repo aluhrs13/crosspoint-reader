@@ -672,6 +672,13 @@ ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(co
   }
   store_.ensureDir(baseDir_ + "/bodies");
 
+  // Publish the denominator before the first fetch: a document can take many
+  // seconds (or a rate-limit wait), and the caller's popup would otherwise sit
+  // at 0/0 until one completes.
+  if (hooks.onProgress != nullptr) {
+    hooks.onProgress(hooks.ctx, 0, outcome.total);
+  }
+
   uint16_t done = 0;
   for (const MissingId& entry : missing) {
     ApiStatus status = ApiStatus::NetworkError;
