@@ -59,7 +59,12 @@ long SdReadwiseFileStore::size(const std::string& path) {
   return static_cast<long>(file.size());
 }
 
-bool SdReadwiseFileStore::ensureDir(const std::string& path) { return Storage.mkdir(path.c_str(), true); }
+bool SdReadwiseFileStore::ensureDir(const std::string& path) {
+  // NOT mkdir: SdFat's mkdir returns false when the directory already exists,
+  // which made every sync after the first fail at its opening ensureDir (found
+  // on hardware). ensureDirectoryExists is the exists-or-create call.
+  return Storage.ensureDirectoryExists(path.c_str());
+}
 
 bool SdReadwiseFileStore::beginWrite(const std::string& path) {
   if (writeOpen_) {
