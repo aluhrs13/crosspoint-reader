@@ -170,6 +170,29 @@ class FakeApi : public readwise::ReadwiseApi {
     return readwise::ApiStatus::Ok;
   }
 
+  // Bodies keyed by document id, delivered in two chunks to exercise the
+  // chunked contract.
+  std::map<std::string, std::string> bodies;
+  readwise::ApiStatus fetchBody(const char* id, readwise::BodySink& sink, uint16_t* retryAfterSeconds) override {
+    if (retryAfterSeconds != nullptr) {
+      *retryAfterSeconds = 0;
+    }
+    auto it = bodies.find(id != nullptr ? id : "");
+    if (it == bodies.end()) {
+      return readwise::ApiStatus::ServerError;
+    }
+    const std::string& body = it->second;
+    const size_t half = body.size() / 2;
+    if (half > 0 && !sink.onBodyChunk(body.data(), half)) {
+      return readwise::ApiStatus::ParseError;
+    }
+    if (!sink.onBodyChunk(body.data() + half, body.size() - half)) {
+      return readwise::ApiStatus::ParseError;
+    }
+    sink.onBodyEnd(true);
+    return readwise::ApiStatus::Ok;
+  }
+
   int pushAttempts = 0;
 };
 

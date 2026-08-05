@@ -43,9 +43,11 @@ Two response properties constrain the client:
 - **`Transfer-Encoding: chunked`** — list responses carry no `Content-Length`. `SecureHttpClient::hasContentLength()` will be false, so the client cannot pre-size a buffer or drive a progress bar from a content length. It must consume until the stream ends.
 - **`Connection: close`** — no keep-alive, so each request pays a full TLS handshake. At the 20 req/min list ceiling this is the dominant cost of a sweep.
 
-**TLS posture (accepted risk).** The wolfSSL path selected by `FREEINK_NET_WOLFSSL` performs no certificate verification: every call site in [lib/KOReaderSync/KOReaderSyncClient.cpp](../lib/KOReaderSync/KOReaderSyncClient.cpp) calls `setInsecure()`, and no CA bundle or pinned certificate exists for that backend. The `esp_crt_bundle_attach` verification in [src/network/HttpDownloader.cpp](../src/network/HttpDownloader.cpp) applies only to the legacy `esp_http_client` path, which is not the one in use.
+**TLS posture (accepted risk, reaffirmed).** The Readwise client calls `setInsecure()`, matching every existing `SecureHttpClient` call site in [lib/KOReaderSync/KOReaderSyncClient.cpp](../lib/KOReaderSync/KOReaderSyncClient.cpp).
 
-A Readwise token therefore crosses an unverified TLS session and is interceptable by an active MITM on the local network. This is the same posture as the existing KOReader sync and is accepted for shipping. It is recorded here so the decision is explicit rather than accidental.
+Correction to the original phase-1 record: this document previously stated that no certificate-verification path existed for the wolfSSL backend. That was wrong — it was inferred while the `freeink-sdk` submodule was not checked out. `SecureHttpClient::setCACert(rootPem)` does exist and verifies against a single PEM root. The decision to ship with `setInsecure()` was reaffirmed with that fact known: pinning roots would tie sync availability to Cloudflare's CA rotation, and the first live handshake validation could only happen on hardware. Pinned-root verification remains an available follow-up.
+
+A Readwise token therefore crosses an unverified TLS session and is interceptable by an active MITM on the local network. It is recorded here so the decision is explicit rather than accidental.
 
 **Heap gating.** Every request must be gated on free heap before the handshake, following `MIN_FREE_FOR_TLS` / `MIN_BLOCK_FOR_TLS` in [lib/KOReaderSync/KOReaderSyncClient.cpp](../lib/KOReaderSync/KOReaderSyncClient.cpp), returning a low-memory result rather than attempting the connection.
 
@@ -260,7 +262,7 @@ Against real Reader data this silently discards:
 - `summary` — observed to 2,093 bytes.
 - `title` — observed to 318 bytes, so under the limit today, but not by a comfortable margin.
 
-Phase 4 must extend the parser with a streaming string sink that delivers long values in chunks, before any field above can be consumed. `ReadwiseContract.OversizedStringsAreSilentlyDroppedByTodaysParser` pins the current behaviour and is expected to fail — deliberately — when that work lands. [lib/JsonParser/ReleaseJsonParser.cpp](../lib/JsonParser/ReleaseJsonParser.cpp) is the model for layering a domain parser over the streaming core.
+**Resolved in phase 3:** the parser gained an opt-in streaming string sink (`JsonCallbacks::onStringChunk`/`onStringEnd`). When both callbacks are set, string values of any length stream through the fixed token buffer in chunks; consumers that leave them unset keep the legacy drop-on-overflow behaviour unchanged, which is why `ReadwiseContract.OversizedStringsAreSilentlyDroppedByTodaysParser` still passes — it pins the legacy path that `ReleaseJsonParser` and other existing consumers rely on. `lib/Readwise/ReadwiseListParser` is the streaming-mode consumer, delivering `html_content` to a `BodySink` without ever buffering it.
 
 ## MVP decisions
 

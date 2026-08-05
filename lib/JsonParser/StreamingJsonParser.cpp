@@ -226,8 +226,24 @@ void StreamingJsonParser::handleSkipString(char c) {
 void StreamingJsonParser::appendToken(char c) {
   if (tokenLen < TOKEN_BUF_SIZE - 1) {
     tokenBuf[tokenLen++] = c;
-  } else {
-    tokenOverflow = true;
+    return;
+  }
+  // With a streaming sink installed, a full buffer during a string VALUE is
+  // flushed as a chunk and parsing continues -- values of any length pass
+  // through. Everything else (keys, numbers, or values without a sink) keeps
+  // the legacy behaviour: mark overflow and drop the token at emit time.
+  if (state == State::IN_STRING_VALUE && streamingValues()) {
+    flushValueChunk();
+    tokenBuf[tokenLen++] = c;
+    return;
+  }
+  tokenOverflow = true;
+}
+
+void StreamingJsonParser::flushValueChunk() {
+  if (tokenLen > 0) {
+    cb.onStringChunk(cb.ctx, tokenBuf, tokenLen);
+    tokenLen = 0;
   }
 }
 
@@ -239,7 +255,12 @@ void StreamingJsonParser::emitToken() {
     }
     state = State::SCANNING;
   } else {
-    if (!tokenOverflow && cb.onString) {
+    if (streamingValues()) {
+      // Chunked delivery: remaining bytes, then the end marker. An empty string
+      // is zero chunks followed by onStringEnd.
+      flushValueChunk();
+      cb.onStringEnd(cb.ctx);
+    } else if (!tokenOverflow && cb.onString) {
       tokenBuf[tokenLen] = '\0';
       cb.onString(cb.ctx, tokenBuf, tokenLen);
     }
