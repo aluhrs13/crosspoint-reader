@@ -82,6 +82,32 @@ class ReadwiseSyncEngine {
   // reopened (e.g. resume after restart) and the UI needs its metadata back.
   bool findDocument(const char* id, Document& out);
 
+  // Downloads the body of every cached document that lacks one, so that after
+  // a sync the entire library reads offline. Runs after the metadata stages;
+  // failures are per-document (the on-demand path in the library remains the
+  // retry), except auth/credential failures which abort the pass.
+  //
+  // Body fetches hit the list endpoint's 20 req/min limit, so a large first
+  // sync WILL be throttled: on RateLimited the engine calls `hooks.sleepMs`
+  // with the server's retry-after and retries that document. C function
+  // pointers rather than std::function, per the library-code rule.
+  struct BodySyncHooks {
+    void* ctx = nullptr;
+    // Progress after each document (done includes failures).
+    void (*onProgress)(void* ctx, uint16_t done, uint16_t total) = nullptr;
+    // Blocking wait; the activity supplies delay(). Never called with more
+    // than RATE_LIMIT_WAIT_CAP_MS.
+    void (*sleepMs)(void* ctx, uint32_t ms) = nullptr;
+  };
+  struct BodySyncOutcome {
+    bool ok = false;
+    ApiStatus status = ApiStatus::Ok;
+    uint16_t downloaded = 0;
+    uint16_t failed = 0;
+    uint16_t total = 0;
+  };
+  BodySyncOutcome downloadMissingBodies(const BodySyncHooks& hooks);
+
   // Marks a document's body as cached (or not) by patching the flags byte of
   // its record in place. Without this, a downloaded article would read as
   // "not downloaded" after the post-download restart and be fetched again.

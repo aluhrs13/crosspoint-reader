@@ -24,12 +24,15 @@ class ReadwiseSyncActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
-  bool preventAutoSleep() override { return state == State::CONNECTING || state == State::SYNCING; }
+  bool preventAutoSleep() override {
+    return state == State::CONNECTING || state == State::SYNCING || state == State::DOWNLOADING_BODIES;
+  }
 
  private:
   enum class State : uint8_t {
     CONNECTING,
     SYNCING,
+    DOWNLOADING_BODIES,
     COMPLETE,
     FAILED,
     NO_TOKEN,
@@ -42,5 +45,8 @@ class ReadwiseSyncActivity final : public Activity {
   std::string statusMessage;
   uint16_t pushed = 0;
   uint16_t pulled = 0;
+  uint16_t bodiesDone = 0;
+  uint16_t bodiesTotal = 0;
+  uint16_t bodiesFailed = 0;
   bool wifiActivated = false;
 };

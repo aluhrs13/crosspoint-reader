@@ -5,10 +5,13 @@ add_executable(ReadwiseStorageTest
   ${REPO_ROOT}/lib/Readwise/ReadwiseCodec.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseJournal.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseSyncEngine.cpp
+  ${REPO_ROOT}/lib/Readwise/BodyTextWriter.cpp
+  ${REPO_ROOT}/lib/Readwise/HtmlTextExtractor.cpp
 )
 
 target_include_directories(ReadwiseStorageTest PRIVATE
   ${REPO_ROOT}/lib/Readwise
+  ${REPO_ROOT}/lib/Memory
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 

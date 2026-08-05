@@ -182,9 +182,21 @@ class FakeApi : public readwise::ReadwiseApi {
   // Bodies keyed by document id, delivered in two chunks to exercise the
   // chunked contract.
   std::map<std::string, std::string> bodies;
+  // First N fetchBody calls answer RateLimited (retry-after 16), simulating
+  // the shared 20 req/min budget during a prefetch pass.
+  int bodyRateLimitFirstN = 0;
+  int bodyFetches = 0;
   readwise::ApiStatus fetchBody(const char* id, readwise::BodySink& sink, uint16_t* retryAfterSeconds) override {
+    ++bodyFetches;
     if (retryAfterSeconds != nullptr) {
       *retryAfterSeconds = 0;
+    }
+    if (bodyRateLimitFirstN > 0) {
+      --bodyRateLimitFirstN;
+      if (retryAfterSeconds != nullptr) {
+        *retryAfterSeconds = 16;
+      }
+      return readwise::ApiStatus::RateLimited;
     }
     auto it = bodies.find(id != nullptr ? id : "");
     if (it == bodies.end()) {

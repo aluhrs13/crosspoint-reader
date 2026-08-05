@@ -1,8 +1,12 @@
 #include "ReadwiseSyncEngine.h"
 
+#include <Memory.h>
+
 #include <algorithm>
 #include <cstring>
 #include <utility>
+
+#include "BodyTextWriter.h"
 
 namespace readwise {
 namespace {
@@ -16,6 +20,12 @@ constexpr int MAX_PAGES_PER_LOCATION = 64;
 // abandoned rather than looped, because a blocking wait inside an activity can
 // exceed the watchdog window and reset the device.
 constexpr int MAX_RATE_LIMIT_RETRIES = 1;
+
+// Body fetches share the list endpoint's 20 req/min budget, so a throttled
+// pass waits out the server's retry-after between documents. Bounded well
+// under any watchdog window; the observed value is 16 s.
+constexpr uint32_t DEFAULT_RATE_LIMIT_WAIT_MS = 20000;
+constexpr uint32_t RATE_LIMIT_WAIT_CAP_MS = 30000;
 
 bool sameId(const char* a, const char* b) { return strncmp(a, b, ID_CAP) == 0; }
 
@@ -613,6 +623,104 @@ bool ReadwiseSyncEngine::findDocument(const char* id, Document& out) {
     offset += static_cast<uint32_t>(consumed);
   }
   return false;
+}
+
+ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(const BodySyncHooks& hooks) {
+  BodySyncOutcome outcome;
+
+  // Collect the ids first: setBodyCached patches docs.bin while we work, and
+  // interleaving fetches with an open record scan would be fragile. At the cap
+  // this is a few KB of ids.
+  struct MissingId {
+    char id[ID_CAP];
+  };
+  std::vector<MissingId> missing;
+  {
+    DocsHeader header;
+    uint8_t headerBuffer[DOCS_HEADER_SIZE];
+    if (store_.readRange(docsPath(), 0, headerBuffer, DOCS_HEADER_SIZE) != static_cast<int>(DOCS_HEADER_SIZE) ||
+        !decodeDocsHeader(headerBuffer, DOCS_HEADER_SIZE, header)) {
+      // No cache yet: nothing to download is a success, not a failure.
+      outcome.ok = true;
+      return outcome;
+    }
+    missing.reserve(header.recordCount);
+    uint32_t offset = DOCS_HEADER_SIZE;
+    for (uint16_t i = 0; i < header.recordCount; ++i) {
+      const int read = store_.readRange(docsPath(), offset, recordBuffer_, MAX_ENCODED_RECORD);
+      if (read <= 0) {
+        break;
+      }
+      size_t consumed = 0;
+      if (!decodeDocument(recordBuffer_, static_cast<size_t>(read), scratchDoc_, &consumed)) {
+        break;
+      }
+      // Missing means no flag, or a flag whose file has gone (cache cleared).
+      if ((scratchDoc_.flags & FLAG_HAS_BODY) == 0 || !store_.exists(bodyPath(scratchDoc_.id))) {
+        MissingId entry{};
+        copyBounded(entry.id, ID_CAP, scratchDoc_.id, strlen(scratchDoc_.id));
+        missing.push_back(entry);
+      }
+      offset += static_cast<uint32_t>(consumed);
+    }
+  }
+
+  outcome.total = static_cast<uint16_t>(missing.size());
+  if (missing.empty()) {
+    outcome.ok = true;
+    return outcome;
+  }
+  store_.ensureDir(baseDir_ + "/bodies");
+
+  uint16_t done = 0;
+  for (const MissingId& entry : missing) {
+    ApiStatus status = ApiStatus::NetworkError;
+    for (int attempt = 0; attempt < 1 + MAX_RATE_LIMIT_RETRIES; ++attempt) {
+      auto writer = makeUniqueNoThrow<BodyTextWriter>(store_, bodyPath(entry.id));
+      if (!writer) {
+        status = ApiStatus::LowMemory;
+        break;
+      }
+      uint16_t retryAfter = 0;
+      status = api_.fetchBody(entry.id, *writer, &retryAfter);
+      if (status == ApiStatus::Ok && !writer->committed()) {
+        // 200 with no html_content string: nothing to retry.
+        status = ApiStatus::ParseError;
+      }
+      if (status != ApiStatus::RateLimited) {
+        break;
+      }
+      // Throttled: wait out the server's ask (bounded) and retry this
+      // document once. The activity's delay keeps the UI task serviced.
+      if (hooks.sleepMs != nullptr) {
+        uint32_t waitMs = retryAfter != 0 ? static_cast<uint32_t>(retryAfter) * 1000u : DEFAULT_RATE_LIMIT_WAIT_MS;
+        if (waitMs > RATE_LIMIT_WAIT_CAP_MS) {
+          waitMs = RATE_LIMIT_WAIT_CAP_MS;
+        }
+        hooks.sleepMs(hooks.ctx, waitMs);
+      }
+    }
+
+    if (status == ApiStatus::Ok) {
+      setBodyCached(entry.id, true);
+      ++outcome.downloaded;
+    } else if (status == ApiStatus::AuthFailed || status == ApiStatus::NoCredentials) {
+      // Every remaining fetch would fail identically; abandon the pass. What
+      // already downloaded stays cached.
+      outcome.status = status;
+      return outcome;
+    } else {
+      // Skip this document; the library's on-demand path is the retry.
+      ++outcome.failed;
+    }
+    ++done;
+    if (hooks.onProgress != nullptr) {
+      hooks.onProgress(hooks.ctx, done, outcome.total);
+    }
+  }
+
+  outcome.ok = true;
+  return outcome;
 }
 
 bool ReadwiseSyncEngine::setBodyCached(const char* id, bool cached) {

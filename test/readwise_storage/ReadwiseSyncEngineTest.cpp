@@ -394,6 +394,97 @@ TEST(ReadwiseSync, SetBodyCachedPersistsAcrossReload) {
   EXPECT_FALSE(f.engine.setBodyCached("missing", true));
 }
 
+namespace {
+struct BodyHookRecorder {
+  std::vector<std::pair<uint16_t, uint16_t>> progress;
+  std::vector<uint32_t> sleeps;
+  readwise::ReadwiseSyncEngine::BodySyncHooks hooks() {
+    readwise::ReadwiseSyncEngine::BodySyncHooks h;
+    h.ctx = this;
+    h.onProgress = [](void* ctx, uint16_t done, uint16_t total) {
+      static_cast<BodyHookRecorder*>(ctx)->progress.push_back({done, total});
+    };
+    h.sleepMs = [](void* ctx, uint32_t ms) { static_cast<BodyHookRecorder*>(ctx)->sleeps.push_back(ms); };
+    return h;
+  }
+};
+}  // namespace
+
+// Sync-time prefetch: every cached document without a body gets one, so after
+// a sync the entire library reads offline.
+TEST(ReadwiseSync, DownloadMissingBodiesFetchesOnlyMissing) {
+  Fixture f;
+  f.api.pages.push_back(
+      {{makeDoc("doc1", Location::Later, kT1, kT1), makeDoc("doc2", Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  f.api.bodies["doc1"] = "<p>uno</p>";
+  f.api.bodies["doc2"] = "<p>dos</p>";
+
+  // doc2 already has a cached body on disk and the flag set.
+  ASSERT_TRUE(f.engine.setBodyCached("doc2", true));
+  const std::string doc2Path = f.engine.bodyPath("doc2");
+  f.store.put(doc2Path, {'x'});
+
+  BodyHookRecorder rec;
+  const auto outcome = f.engine.downloadMissingBodies(rec.hooks());
+  ASSERT_TRUE(outcome.ok);
+  EXPECT_EQ(outcome.total, 1);
+  EXPECT_EQ(outcome.downloaded, 1);
+  EXPECT_EQ(outcome.failed, 0);
+  EXPECT_EQ(f.api.bodyFetches, 1) << "the cached document must not be re-fetched";
+  EXPECT_TRUE(f.store.has(f.engine.bodyPath("doc1")));
+  ASSERT_EQ(rec.progress.size(), 1u);
+  EXPECT_EQ(rec.progress[0], (std::pair<uint16_t, uint16_t>{1, 1}));
+
+  Document doc;
+  ASSERT_TRUE(f.engine.findDocument("doc1", doc));
+  EXPECT_TRUE(doc.flags & FLAG_HAS_BODY);
+
+  // A second pass has nothing to do.
+  const auto again = f.engine.downloadMissingBodies(rec.hooks());
+  EXPECT_TRUE(again.ok);
+  EXPECT_EQ(again.total, 0);
+}
+
+// Throttling is expected -- body fetches share the list endpoint's budget. The
+// engine waits out retry-after via the sleep hook and retries that document.
+TEST(ReadwiseSync, DownloadMissingBodiesWaitsOutRateLimit) {
+  Fixture f;
+  f.api.pages.push_back({{makeDoc("doc1", Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  f.api.bodies["doc1"] = "<p>uno</p>";
+  f.api.bodyRateLimitFirstN = 1;
+
+  BodyHookRecorder rec;
+  const auto outcome = f.engine.downloadMissingBodies(rec.hooks());
+  ASSERT_TRUE(outcome.ok);
+  EXPECT_EQ(outcome.downloaded, 1);
+  ASSERT_EQ(rec.sleeps.size(), 1u);
+  EXPECT_EQ(rec.sleeps[0], 16000u) << "the server's retry-after drives the wait";
+}
+
+// A single bad document must not sink the pass; it is skipped and the
+// on-demand path remains its retry.
+TEST(ReadwiseSync, DownloadMissingBodiesSkipsFailuresButAbortsOnAuth) {
+  Fixture f;
+  f.api.pages.push_back(
+      {{makeDoc("doc1", Location::Later, kT1, kT1), makeDoc("doc2", Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  // doc1 has no body entry in the fake -> ServerError; doc2 succeeds.
+  f.api.bodies["doc2"] = "<p>dos</p>";
+
+  BodyHookRecorder rec;
+  const auto outcome = f.engine.downloadMissingBodies(rec.hooks());
+  ASSERT_TRUE(outcome.ok);
+  EXPECT_EQ(outcome.total, 2);
+  EXPECT_EQ(outcome.downloaded, 1);
+  EXPECT_EQ(outcome.failed, 1);
+
+  Document doc;
+  ASSERT_TRUE(f.engine.findDocument("doc1", doc));
+  EXPECT_FALSE(doc.flags & FLAG_HAS_BODY) << "a failed fetch must not claim a cached body";
+}
+
 TEST(ReadwiseSync, FindDocumentById) {
   Fixture f;
   f.api.pages.push_back(

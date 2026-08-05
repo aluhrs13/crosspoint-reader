@@ -282,11 +282,11 @@ Scoping to `new` + `later` also keeps the synced set at 2,275 documents on the p
 
 Note that `shortlist` exists and is not in the published docs. It should probably be synced too, but that is a product call to confirm rather than something the API forced.
 
-### Cap: 100 documents of metadata, bodies fetched on demand
+### Cap: 100 documents of metadata, bodies prefetched during sync
 
-One `limit=100` page of metadata, tunable in settings. Bodies are **not** prefetched — a body is fetched when the document is opened, cached to SD, and evicted LRU.
+One `limit=100` page of metadata, tunable in settings. **Revised during hardware testing (owner decision):** sync also downloads every missing article body, so "Sync" is the only operation that needs connectivity and the whole library reads offline afterwards. The on-demand per-document fetch remains as the retry path for bodies that failed during the pass.
 
-*Why:* prefetching 100 bodies would mean ~9 MB of transfer, 100 TLS handshakes against a 20/min ceiling, and a large SD write burst, to produce articles the user mostly will not read. On-demand fetch makes the cap soft and keeps the sync pass short.
+*Cost accepted:* body fetches share the list endpoint's 20 req/min budget, so a large first sync throttles — the engine waits out each `retry-after` between documents and shows per-document progress. Incremental syncs only fetch bodies for new/changed documents, so the steady-state cost is small.
 
 ### Cached bodies are dropped on archive and on confirmed deletion
 

@@ -12,6 +12,7 @@ add_executable(ReadwiseClientTest
 )
 
 target_include_directories(ReadwiseClientTest PRIVATE
+  ${REPO_ROOT}/lib/Memory
   ${REPO_ROOT}/lib/JsonParser
   ${REPO_ROOT}/lib/Readwise
   ${REPO_ROOT}/test/readwise_storage

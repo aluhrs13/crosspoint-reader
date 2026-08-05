@@ -81,14 +81,54 @@ void ReadwiseSyncActivity::performSync() {
   engine->setDocumentCap(READWISE_STORE.getDocumentCap());
 
   const readwise::SyncOutcome outcome = engine->sync();
+
+  if (outcome.ok) {
+    // Sync is the only online operation: fetch every missing article body now
+    // so the whole library reads offline afterwards. Throttling is expected --
+    // body fetches share the list endpoint's 20 req/min budget -- and the
+    // engine waits out retry-after between documents via the sleep hook.
+    {
+      RenderLock lock(*this);
+      state = State::DOWNLOADING_BODIES;
+      pushed = outcome.pushed;
+      pulled = outcome.pulled;
+    }
+    requestUpdateAndWait();
+
+    readwise::ReadwiseSyncEngine::BodySyncHooks hooks;
+    hooks.ctx = this;
+    hooks.onProgress = [](void* ctx, uint16_t done, uint16_t total) {
+      auto* self = static_cast<ReadwiseSyncActivity*>(ctx);
+      {
+        RenderLock lock(*self);
+        self->bodiesDone = done;
+        self->bodiesTotal = total;
+      }
+      self->requestUpdate();
+    };
+    hooks.sleepMs = [](void*, uint32_t ms) { delay(ms); };
+    const auto bodies = engine->downloadMissingBodies(hooks);
+    engine.reset();
+
+    RenderLock lock(*this);
+    bodiesDone = bodies.downloaded;
+    bodiesTotal = bodies.total;
+    bodiesFailed = bodies.failed;
+    if (bodies.ok) {
+      state = State::COMPLETE;
+    } else {
+      // Metadata committed; only the body pass failed. Report the cause; the
+      // downloaded articles stay cached and the rest retry on demand.
+      state = State::FAILED;
+      statusMessage = I18N.get(ReadwiseUi::statusStrId(bodies.status));
+    }
+    requestUpdate();
+    return;
+  }
   engine.reset();
 
   RenderLock lock(*this);
-  if (outcome.ok) {
-    state = State::COMPLETE;
-    pushed = outcome.pushed;
-    pulled = outcome.pulled;
-  } else {
+  {
     state = State::FAILED;
     statusMessage = outcome.status == readwise::ApiStatus::Ok ? tr(STR_READWISE_SYNC_FAILED)
                                                               : I18N.get(ReadwiseUi::statusStrId(outcome.status));
@@ -122,10 +162,23 @@ void ReadwiseSyncActivity::render(RenderLock&&) {
     case State::SYNCING:
       GUI.drawPopup(renderer, tr(STR_READWISE_SYNCING));
       break;
+    case State::DOWNLOADING_BODIES: {
+      // drawPopup does not wrap, so keep this short: "Downloading article... 3/12".
+      char progress[64];
+      snprintf(progress, sizeof(progress), "%s %u/%u", tr(STR_READWISE_DOWNLOADING), (unsigned)bodiesDone,
+               (unsigned)bodiesTotal);
+      GUI.drawPopup(renderer, progress);
+      break;
+    }
     case State::COMPLETE: {
-      char summary[96];
-      snprintf(summary, sizeof(summary), "%s (%u/%u)", tr(STR_READWISE_SYNC_COMPLETE), (unsigned)pushed,
-               (unsigned)pulled);
+      char summary[64];
+      if (bodiesFailed > 0) {
+        snprintf(summary, sizeof(summary), "%s (%u/%u, -%u)", tr(STR_READWISE_SYNC_COMPLETE), (unsigned)bodiesDone,
+                 (unsigned)bodiesTotal, (unsigned)bodiesFailed);
+      } else {
+        snprintf(summary, sizeof(summary), "%s (%u/%u)", tr(STR_READWISE_SYNC_COMPLETE), (unsigned)bodiesDone,
+                 (unsigned)bodiesTotal);
+      }
       GUI.drawPopup(renderer, summary);
       break;
     }

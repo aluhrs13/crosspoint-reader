@@ -323,8 +323,11 @@ void ReadwiseLibraryActivity::render(RenderLock&&) {
   }
   if (state == State::DOWNLOAD_FAILED) {
     GUI.drawHeader(renderer, headerRect, tr(STR_READWISE_LIBRARY));
-    const std::string message = std::string(tr(STR_READWISE_DOWNLOAD_FAILED)) + ": " + statusMessage;
-    GUI.drawPopup(renderer, message.c_str());
+    // drawPopup sizes to its text with no wrapping: the combined
+    // "Download failed: <reason>" overflowed the 480px portrait width and
+    // spammed per-pixel GFX clip errors. The translated reason alone fits and
+    // says enough.
+    GUI.drawPopup(renderer, statusMessage.c_str());
     renderer.displayBuffer();
     return;
   }
