@@ -16,6 +16,7 @@
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
+#include "ReadwiseCredentialStore.h"
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -26,6 +27,9 @@ int HomeActivity::getMenuItemCount() const {
     count += recentBooks.size();
   }
   if (hasOpdsServers) {
+    count++;
+  }
+  if (hasReadwise) {
     count++;
   }
   return count;
@@ -112,12 +116,14 @@ void HomeActivity::onEnter() {
   Activity::onEnter();
 
   hasOpdsServers = OPDS_STORE.hasServers();
+  hasReadwise = READWISE_STORE.isSyncEnabled();
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   loadRecentBooks(metrics.homeRecentBooksCount);
 
   const auto base = static_cast<int>(recentBooks.size());
-  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, hasOpdsServers);
+  selectorIndex =
+      initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, hasOpdsServers, hasReadwise);
 
   // Trigger first update
   requestUpdate();
@@ -176,7 +182,7 @@ void HomeActivity::loop() {
       return;
     }
     const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
-    switch (indexToMenuItem(menuIndex, hasOpdsServers)) {
+    switch (indexToMenuItem(menuIndex, hasOpdsServers, hasReadwise)) {
       case HomeMenuItem::FILE_BROWSER:
         onFileBrowserOpen();
         break;
@@ -185,6 +191,9 @@ void HomeActivity::loop() {
         break;
       case HomeMenuItem::OPDS_BROWSER:
         onOpdsBrowserOpen();
+        break;
+      case HomeMenuItem::READWISE:
+        onReadwiseOpen();
         break;
       case HomeMenuItem::FILE_TRANSFER:
         onFileTransferOpen();
@@ -309,6 +318,14 @@ void HomeActivity::render(RenderLock&&) {
     menuIcons.insert(menuIcons.begin() + 2, Library);
   }
 
+  if (hasReadwise) {
+    // Position must mirror indexToMenuItem: after OPDS (when present), before
+    // File Transfer.
+    const int readwisePos = hasOpdsServers ? 3 : 2;
+    menuItems.insert(menuItems.begin() + readwisePos, tr(STR_READWISE));
+    menuIcons.insert(menuIcons.begin() + readwisePos, Library);
+  }
+
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
     // Insert Continue Reading at the top if enabled in theme
     menuItems.insert(menuItems.begin(), tr(STR_CONTINUE_READING));
@@ -351,3 +368,5 @@ void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
+
+void HomeActivity::onReadwiseOpen() { activityManager.goToReadwiseLibrary(); }

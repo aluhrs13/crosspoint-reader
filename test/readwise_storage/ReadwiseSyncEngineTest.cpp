@@ -326,6 +326,42 @@ TEST(ReadwiseSync, IncompleteSweepExpiresNothing) {
   EXPECT_EQ(page.size(), 2u) << "a failed sweep must never be treated as evidence of deletion";
 }
 
+// Queued actions must be visible immediately, not at the next sync: archiving
+// offline removes the document from the synced indexes via rebuildLocal.
+TEST(ReadwiseSync, RebuildLocalReflectsQueuedActionsOffline) {
+  Fixture f;
+  f.api.pages.push_back(
+      {{makeDoc("doc1", Location::Later, kT1, kT1), makeDoc("doc2", Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_TRUE(f.engine.queueLocationChange("doc1", Location::Archive, kT1));
+  ASSERT_TRUE(f.engine.rebuildLocal());
+
+  std::vector<Document> page;
+  ASSERT_TRUE(f.engine.readIndexPage(Location::Later, 0, 10, page));
+  ASSERT_EQ(page.size(), 1u) << "the archived document must leave the list before any sync";
+  EXPECT_STREQ(page[0].id, "doc2");
+  EXPECT_EQ(f.engine.indexCount(Location::Later), 1u);
+
+  // The op is still queued for the next sync.
+  ReadwiseJournal reloaded(f.store, f.engine.journalPath());
+  ASSERT_TRUE(reloaded.load());
+  EXPECT_EQ(reloaded.entries().size(), 1u);
+}
+
+TEST(ReadwiseSync, FindDocumentById) {
+  Fixture f;
+  f.api.pages.push_back(
+      {{makeDoc("doc1", Location::Later, kT1, kT1), makeDoc("doc2", Location::New, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  Document found;
+  ASSERT_TRUE(f.engine.findDocument("doc2", found));
+  EXPECT_EQ(found.location, Location::New);
+  EXPECT_FALSE(f.engine.findDocument("missing", found));
+  EXPECT_FALSE(f.engine.findDocument(nullptr, found));
+}
+
 TEST(ReadwiseSync, CompletedSweepExpiresMissingDocuments) {
   Fixture f;
   f.api.pages.push_back(

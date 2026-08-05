@@ -72,6 +72,20 @@ class ReadwiseSyncEngine {
   // cleared and filled with at most `count` documents.
   bool readIndexPage(Location location, uint16_t offset, uint16_t count, std::vector<Document>& out);
 
+  // Rewrites docs.bin and the indexes with the queued journal overrides applied,
+  // without any network traffic. This is what makes a queued action visible
+  // immediately: archiving a document offline removes it from the synced
+  // indexes right away rather than at the next sync.
+  bool rebuildLocal();
+
+  // Linear scan of docs.bin for one document. Used when a managed body path is
+  // reopened (e.g. resume after restart) and the UI needs its metadata back.
+  bool findDocument(const char* id, Document& out);
+
+  // Total entries in one location index, for list sizing. Returns 0 when the
+  // index is absent.
+  uint16_t indexCount(Location location);
+
   bool loadCheckpoint(Checkpoint& out);
   ReadwiseJournal& journal() { return journal_; }
 

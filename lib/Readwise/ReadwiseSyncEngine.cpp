@@ -565,6 +565,62 @@ bool ReadwiseSyncEngine::readIndexPage(Location location, uint16_t offset, uint1
   return true;
 }
 
+bool ReadwiseSyncEngine::rebuildLocal() {
+  if (!journal_.load()) {
+    return false;
+  }
+  // No staged documents: everything carries over from the existing docs.bin,
+  // and the carry-over path applies the queued overrides and body eviction.
+  std::vector<IndexEntry> indexEntries;
+  indexEntries.reserve(documentCap_);
+  uint16_t retained = 0;
+  if (!mergeIntoDocs(docsPath(), {}, /*carryOverExisting=*/true, indexEntries, retained)) {
+    return false;
+  }
+  return writeIndexes(indexEntries);
+}
+
+bool ReadwiseSyncEngine::findDocument(const char* id, Document& out) {
+  if (id == nullptr || id[0] == '\0') {
+    return false;
+  }
+  DocsHeader header;
+  uint8_t headerBuffer[DOCS_HEADER_SIZE];
+  if (store_.readRange(docsPath(), 0, headerBuffer, DOCS_HEADER_SIZE) != static_cast<int>(DOCS_HEADER_SIZE) ||
+      !decodeDocsHeader(headerBuffer, DOCS_HEADER_SIZE, header)) {
+    return false;
+  }
+  uint32_t offset = DOCS_HEADER_SIZE;
+  for (uint16_t i = 0; i < header.recordCount; ++i) {
+    const int read = store_.readRange(docsPath(), offset, recordBuffer_, MAX_ENCODED_RECORD);
+    if (read <= 0) {
+      return false;
+    }
+    size_t consumed = 0;
+    if (!decodeDocument(recordBuffer_, static_cast<size_t>(read), scratchDoc_, &consumed)) {
+      return false;
+    }
+    if (sameId(scratchDoc_.id, id)) {
+      out = scratchDoc_;
+      return true;
+    }
+    offset += static_cast<uint32_t>(consumed);
+  }
+  return false;
+}
+
+uint16_t ReadwiseSyncEngine::indexCount(Location location) {
+  uint8_t header[INDEX_HEADER_SIZE];
+  if (store_.readRange(indexPath(location), 0, header, INDEX_HEADER_SIZE) != static_cast<int>(INDEX_HEADER_SIZE)) {
+    return 0;
+  }
+  uint16_t count = 0;
+  if (!decodeIndexHeader(header, INDEX_HEADER_SIZE, count)) {
+    return 0;
+  }
+  return count;
+}
+
 SyncOutcome ReadwiseSyncEngine::reconcile() {
   SyncOutcome outcome;
   outcome.failedStage = SyncStage::Pulling;
