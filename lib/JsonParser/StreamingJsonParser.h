@@ -14,6 +14,23 @@ struct JsonCallbacks {
   void (*onObjectEnd)(void* ctx);
   void (*onArrayStart)(void* ctx);
   void (*onArrayEnd)(void* ctx);
+
+  // Optional streaming sink for string VALUES (never keys). When BOTH are set,
+  // every string value is delivered as zero or more onStringChunk calls holding
+  // decoded bytes, followed by exactly one onStringEnd -- and onString is not
+  // called for values at all. Values of any length then stream through the
+  // fixed token buffer instead of being dropped on overflow, which is what the
+  // legacy behaviour does (see appendToken).
+  //
+  // Chunks split at arbitrary byte positions, including inside multi-byte UTF-8
+  // sequences; consumers writing to a file can concatenate blindly, consumers
+  // interpreting text must handle split sequences.
+  //
+  // Deliberately appended at the end of the struct: existing consumers that
+  // aggregate-initialize the first ten members get nullptr here and keep the
+  // legacy behaviour unchanged.
+  void (*onStringChunk)(void* ctx, const char* data, size_t len);
+  void (*onStringEnd)(void* ctx);
 };
 
 class StreamingJsonParser {
@@ -53,6 +70,13 @@ class StreamingJsonParser {
   void appendToken(char c);
   void emitToken();
 
+  bool streamingValues() const { return cb.onStringChunk != nullptr && cb.onStringEnd != nullptr; }
+  void flushValueChunk();
+
+  void handleUnicodeHexDigit(char c);
+  void emitCodepoint(uint32_t codepoint);
+  void flushPendingSurrogate();
+
   bool inArray() const { return nestingDepth > 0 && nestingStack[nestingDepth - 1] == Container::ARRAY; }
 
   JsonCallbacks cb;
@@ -70,4 +94,12 @@ class StreamingJsonParser {
   char literalExpected[6];
   uint8_t literalLen;
   uint8_t literalPos;
+
+  // \uXXXX escape decoding, incremental so a chunk boundary can land anywhere
+  // inside the six escape characters. `unicodeDigits` > 0 while collecting hex;
+  // `pendingSurrogate` holds a high surrogate awaiting its low half. An
+  // unpaired surrogate decodes to U+FFFD rather than corrupting the stream.
+  uint8_t unicodeDigits;
+  uint32_t unicodeValue;
+  uint32_t pendingSurrogate;
 };

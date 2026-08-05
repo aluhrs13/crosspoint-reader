@@ -27,7 +27,7 @@ uname -s
 **Detection Required**: Run `uname -s` at session start to determine platform
 
 ### Platform-Specific Behaviors
-- **Windows (Git Bash)**: Unix commands, `C:\` paths in Windows but `/` in bash, limited glob (use `find`+`xargs`)
+- **Windows (Git Bash)**: Unix commands, `C:\` paths in Windows but `/` in bash, limited glob (use `find`+`xargs`). Fine for git, formatting, and the host test suite — but **`pio` will not work here**; see [Windows Build Requirements](#windows-build-requirements).
 - **Linux/WSL**: Full bash, Unix paths, native glob support
 
 **Cross-Platform Code Formatting**:
@@ -510,6 +510,41 @@ pio run -t uploadfs
 * Use PlatformIO toolbar: Build (✓), Upload (→), Clean (🗑️)
 * Or Command Palette: `PlatformIO: Build`, `PlatformIO: Upload`, etc.
 
+**First build**: requires the SDK submodule, or the ESP-IDF framework fails to configure.
+```bash
+git submodule update --init --recursive
+```
+
+### Windows Build Requirements
+
+**CRITICAL: run `pio` from PowerShell or cmd, NEVER from Git Bash.** Each failure below is silent or badly misattributed, so recognizing them saves a long debugging detour.
+
+```powershell
+$env:PYTHONIOENCODING='utf-8'
+pio run
+```
+
+1. **Git Bash / MSys is rejected outright.** `idf_tools.py` aborts with `ERROR: MSys/Mingw is not supported`. PlatformIO does not surface this — the ESP-IDF toolchain install silently no-ops, and the build fails much later with `FileNotFoundError: [WinError 2]` from `run_cmake`, which looks like a missing CMake rather than a wrong shell. Symptom to check: `~/.espressif/` and `~/.platformio/tools/` do not exist.
+
+2. **`PYTHONIOENCODING=utf-8` is required.** Without a TTY, Python defaults to cp1252 and the i18n generator's non-ASCII language names raise `UnicodeEncodeError` inside PlatformIO's stdout-reader thread. That thread dies, nothing drains the child's stdout pipe, the pipe fills, and the compiler blocks writing to it. The build then **hangs indefinitely** with near-zero CPU — it is not slow, it is deadlocked.
+
+3. **An interrupted build can corrupt the tool packages.** Killing `pio` mid-install leaves `tool-cmake` / `tool-ninja` holding a `.piopm` marker and a `package.json` but no binaries. PlatformIO then believes they are installed and never refetches. Deleting the directories alone does not help — they legitimately contain only manifests, and the real payload is installed by `idf_tools.py` into `IDF_TOOLS_PATH` (`~/.platformio`). Fix the shell (item 1) and the install repairs itself.
+
+**Diagnosing a hung build**: compare elapsed time against accumulated CPU. A build blocked on a full pipe shows seconds of CPU over tens of minutes.
+```powershell
+Get-Process python | Select-Object Id,CPU,StartTime
+```
+
+### PlatformIO Only Compiles Referenced Libraries
+
+**A `pio run` that succeeds does NOT prove new code under `lib/` compiles.** PlatformIO's Library Dependency Finder builds only libraries reachable by `#include` from `src/`. A new `lib/<Name>/` that nothing references yet is skipped entirely and silently — so neither a local build nor CI will catch a compile error in it.
+
+Verify a not-yet-wired library by temporarily adding its header to a `src/` file, building, then reverting:
+```bash
+find .pio/build -name "*.o" -path "*<LibName>*"
+```
+If that returns nothing, the library was never compiled. Files under `src/` are always built, so a store or activity placed there is covered without this step.
+
 ### Monitoring and Debugging
 
 ```bash
@@ -536,6 +571,25 @@ find src -name "*.cpp" -o -name "*.h" | xargs clang-format -i
 
 # Format code (clang-format) - Linux
 clang-format -i src/**/*.cpp src/**/*.h
+```
+
+`clang-format` is available as a Python package if it is not on PATH: `pip install clang-format`. Run it before pushing — `pr-formatting-check.yml` gates on it.
+
+### Host Test Suite
+
+GoogleTest suites under `test/`, built with CMake rather than PlatformIO. These run on the build machine, so they are the fastest feedback loop and the only automated guard for library code that no `src/` file references yet.
+
+```bash
+cmake -S test -B build/test && cmake --build build/test && ctest --test-dir build/test --output-on-failure
+```
+
+Adding a suite: create `test/<name>/` with a `CMakeLists.txt` and the test source, then add one `add_subdirectory(<name>)` line to `test/CMakeLists.txt`. Link `crosspoint_test_common` and `GTest::gtest_main`, and list the specific `${REPO_ROOT}/lib/...` sources under test.
+
+**Only host-compilable code can be tested this way.** Anything pulling `Arduino.h`, `ArduinoJson.h`, or `HalStorage.h` will not build. Design new logic so the pure part — parsing, encoding, merging, state machines — is separable from the I/O, and put the filesystem or network behind an interface with an in-memory fake. `lib/JsonParser/` and `lib/Readwise/` are both built this way; `test/minibidi_arabic/stubs/Logging.h` is the precedent for stubbing a small dependency instead.
+
+For fixtures, either embed a raw string literal in the test (`test/release_json_parser/`) or pass a directory in via a compile definition (`test/hyphenation_eval/`, `test/readwise_contract/`):
+```cmake
+target_compile_definitions(MyTest PRIVATE FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 ```
 
 ### Debugging Crashes
@@ -794,17 +848,21 @@ build_flags =
 ### Testing Checklist
 
 **AI agent scope** (what you CAN verify):
-1. ✅ **Build**: `pio run -t clean && pio run` (0 errors/warnings)
-2. ✅ **Quality**: `pio check` + `find src -name "*.cpp" -o -name "*.h" | xargs clang-format -i`
-3. ✅ **Format**: Commit messages (`feat:`/`fix:`), no `.gitignore`-excluded files staged (e.g., `*.generated.h`, `.pio/`, `platformio.local.ini`)
-4. ✅ **CI**: Fix GitHub Actions failures before review
-5. ✅ **Code review**: Ensure orientation-aware logic is correct in all 4 modes by inspecting switch/case coverage
+1. ✅ **Host tests**: `cmake -S test -B build/test && cmake --build build/test && ctest --test-dir build/test`
+2. ✅ **Build**: `pio run -t clean && pio run` (0 errors/warnings) — from PowerShell/cmd on Windows, not Git Bash
+3. ✅ **Build actually covered your code**: confirm an object exists for each new file (`find .pio/build -name "*.o" -path "*<Name>*"`). A new `lib/` not yet `#include`d from `src/` is skipped silently
+4. ✅ **Quality**: `pio check` + `find src -name "*.cpp" -o -name "*.h" | xargs clang-format -i`
+5. ✅ **Format**: Commit messages (`feat:`/`fix:`), no `.gitignore`-excluded files staged (e.g., `*.generated.h`, `.pio/`, `platformio.local.ini`)
+6. ✅ **CI**: Fix GitHub Actions failures before review — but confirm CI actually ran; do not report a green build you did not see
+7. ✅ **Code review**: Ensure orientation-aware logic is correct in all 4 modes by inspecting switch/case coverage
+
+**Report honestly what was and was not verified.** "Builds clean" means a compiler produced objects for the changed files, not that the project built while skipping them.
 
 **Human tester scope** (flag these for the user):
-6. 🔲 **Device**: Test on hardware
-7. 🔲 **Orientations**: Verify all 4 modes (Portrait/Inverted/Landscape CW/CCW)
-8. 🔲 **Heap**: `ESP.getFreeHeap()` > 50KB, no leaks
-9. 🔲 **Cache**: If EPUB modified, delete `.crosspoint/` and verify re-parse
+8. 🔲 **Device**: Test on hardware
+9. 🔲 **Orientations**: Verify all 4 modes (Portrait/Inverted/Landscape CW/CCW)
+10. 🔲 **Heap**: `ESP.getFreeHeap()` > 50KB, no leaks
+11. 🔲 **Cache**: If EPUB modified, delete `.crosspoint/` and verify re-parse
 
 ### CI/CD Pipeline Awareness
 

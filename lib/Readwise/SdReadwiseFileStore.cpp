@@ -31,6 +31,22 @@ int SdReadwiseFileStore::readRange(const std::string& path, size_t offset, uint8
   return read;
 }
 
+bool SdReadwiseFileStore::writeRange(const std::string& path, size_t offset, const uint8_t* data, size_t len) {
+  // O_RDWR without O_TRUNC: patch in place. openFileForWrite truncates, so
+  // open directly with flags here.
+  HalFile file = Storage.open(path.c_str(), O_RDWR);
+  if (!file) {
+    LOG_ERR("RWS", "writeRange: cannot open %s", path.c_str());
+    return false;
+  }
+  if (!file.seek(offset)) {
+    return false;
+  }
+  const bool ok = file.write(data, len) == len;
+  file.flush();
+  return ok;
+}
+
 bool SdReadwiseFileStore::exists(const std::string& path) { return Storage.exists(path.c_str()); }
 
 bool SdReadwiseFileStore::remove(const std::string& path) { return Storage.remove(path.c_str()); }

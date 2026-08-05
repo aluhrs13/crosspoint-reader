@@ -326,6 +326,87 @@ TEST(ReadwiseSync, IncompleteSweepExpiresNothing) {
   EXPECT_EQ(page.size(), 2u) << "a failed sweep must never be treated as evidence of deletion";
 }
 
+// Queued actions must be visible immediately, not at the next sync: archiving
+// offline removes the document from the synced indexes via rebuildLocal.
+TEST(ReadwiseSync, RebuildLocalReflectsQueuedActionsOffline) {
+  Fixture f;
+  f.api.pages.push_back(
+      {{makeDoc("doc1", Location::Later, kT1, kT1), makeDoc("doc2", Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_TRUE(f.engine.queueLocationChange("doc1", Location::Archive, kT1));
+  ASSERT_TRUE(f.engine.rebuildLocal());
+
+  std::vector<Document> page;
+  ASSERT_TRUE(f.engine.readIndexPage(Location::Later, 0, 10, page));
+  ASSERT_EQ(page.size(), 1u) << "the archived document must leave the list before any sync";
+  EXPECT_STREQ(page[0].id, "doc2");
+  EXPECT_EQ(f.engine.indexCount(Location::Later), 1u);
+
+  // The op is still queued for the next sync.
+  ReadwiseJournal reloaded(f.store, f.engine.journalPath());
+  ASSERT_TRUE(reloaded.load());
+  EXPECT_EQ(reloaded.entries().size(), 1u);
+}
+
+// Ordinary navigation must not rewrite the cache: an empty journal makes
+// rebuildLocal a no-op with zero durable writes.
+TEST(ReadwiseSync, RebuildLocalWithEmptyJournalWritesNothing) {
+  Fixture f;
+  f.api.pages.push_back({{makeDoc("doc1", Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  const int writesBefore = f.store.writeCount();
+  ASSERT_TRUE(f.engine.rebuildLocal());
+  EXPECT_EQ(f.store.writeCount(), writesBefore) << "a no-op rebuild must not touch the SD card";
+}
+
+// Without persisting FLAG_HAS_BODY, a downloaded article would show as "not
+// downloaded" after the post-download restart and be fetched again.
+TEST(ReadwiseSync, SetBodyCachedPersistsAcrossReload) {
+  Fixture f;
+  f.api.pages.push_back(
+      {{makeDoc("doc1", Location::Later, kT1, kT1), makeDoc("doc2", Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_TRUE(f.engine.setBodyCached("doc1", true));
+
+  // A fresh engine over the same store simulates the restart.
+  ReadwiseSyncEngine reloaded(f.api, f.store, kBase);
+  Document doc;
+  ASSERT_TRUE(reloaded.findDocument("doc1", doc));
+  EXPECT_TRUE(doc.flags & FLAG_HAS_BODY);
+  ASSERT_TRUE(reloaded.findDocument("doc2", doc));
+  EXPECT_FALSE(doc.flags & FLAG_HAS_BODY) << "only the patched record may change";
+
+  // And the index-read path sees it too.
+  std::vector<Document> page;
+  ASSERT_TRUE(reloaded.readIndexPage(Location::Later, 0, 10, page));
+  bool found = false;
+  for (const Document& d : page) {
+    if (std::string(d.id) == "doc1") {
+      found = true;
+      EXPECT_TRUE(d.flags & FLAG_HAS_BODY);
+    }
+  }
+  EXPECT_TRUE(found);
+
+  EXPECT_FALSE(f.engine.setBodyCached("missing", true));
+}
+
+TEST(ReadwiseSync, FindDocumentById) {
+  Fixture f;
+  f.api.pages.push_back(
+      {{makeDoc("doc1", Location::Later, kT1, kT1), makeDoc("doc2", Location::New, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  Document found;
+  ASSERT_TRUE(f.engine.findDocument("doc2", found));
+  EXPECT_EQ(found.location, Location::New);
+  EXPECT_FALSE(f.engine.findDocument("missing", found));
+  EXPECT_FALSE(f.engine.findDocument(nullptr, found));
+}
+
 TEST(ReadwiseSync, CompletedSweepExpiresMissingDocuments) {
   Fixture f;
   f.api.pages.push_back(

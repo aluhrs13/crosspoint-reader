@@ -66,6 +66,18 @@ class DocumentSink {
   virtual bool onDocument(const Document& doc) = 0;
 };
 
+// Receives an article's html_content in chunks as it decodes from the JSON
+// stream. A body is ~88 KB observed, so it can never be delivered whole.
+// Chunks split at arbitrary byte positions, including inside UTF-8 sequences.
+class BodySink {
+ public:
+  virtual ~BodySink() = default;
+  virtual bool onBodyChunk(const char* data, size_t len) = 0;
+  // `complete` is false when the transfer ended before the string closed; the
+  // sink must then discard rather than commit partial text.
+  virtual bool onBodyEnd(bool complete) = 0;
+};
+
 class ReadwiseApi {
  public:
   virtual ~ReadwiseApi() = default;
@@ -81,6 +93,11 @@ class ReadwiseApi {
   // 200 for fields it ignores -- so an implementation that needs certainty must
   // read the document back.
   virtual ApiStatus pushOp(const struct PendingOp& op) = 0;
+
+  // Fetches one document with withHtmlContent=true and streams the body to
+  // `sink`. Used on-demand when a document is opened; bodies are never
+  // prefetched during sync. `retryAfterSeconds` is set on RateLimited.
+  virtual ApiStatus fetchBody(const char* id, BodySink& sink, uint16_t* retryAfterSeconds) = 0;
 };
 
 }  // namespace readwise

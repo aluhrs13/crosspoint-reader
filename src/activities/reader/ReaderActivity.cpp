@@ -15,6 +15,7 @@
 #include "TxtReaderActivity.h"
 #include "Xtc.h"
 #include "XtcReaderActivity.h"
+#include "activities/readwise/ReadwiseSupport.h"
 #include "activities/util/BmpViewerActivity.h"
 #include "activities/util/FullScreenMessageActivity.h"
 #include "components/UITheme.h"
@@ -137,8 +138,16 @@ void ReaderActivity::onGoToXtcReader(std::unique_ptr<Xtc> xtc) {
 void ReaderActivity::onGoToTxtReader(std::unique_ptr<Txt> txt) {
   const auto txtPath = txt->getPath();
   currentBookPath = txtPath;
-  activityManager.replaceActivity(
-      std::make_unique<TxtReaderActivity>(renderer, mappedInput, std::move(txt), initialRefreshCountdown()));
+  // A Readwise body opens managed: library-owned title, Back to the library,
+  // no recents entry. This also covers resume-after-restart, where the managed
+  // context would otherwise be lost.
+  TxtManagedDocInfo managed;
+  if (ReadwiseUi::isBodyPath(txtPath)) {
+    managed.managed = true;
+    managed.title = ReadwiseUi::titleForBodyPath(txtPath);
+  }
+  activityManager.replaceActivity(std::make_unique<TxtReaderActivity>(renderer, mappedInput, std::move(txt),
+                                                                      initialRefreshCountdown(), std::move(managed)));
 }
 
 void ReaderActivity::onEnter() {

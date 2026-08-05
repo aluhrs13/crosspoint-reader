@@ -15,6 +15,7 @@
 #include "home/RecentBooksActivity.h"
 #include "network/CrossPointWebServerActivity.h"
 #include "reader/ReaderActivity.h"
+#include "readwise/ReadwiseLibraryActivity.h"
 #include "settings/OpdsServerListActivity.h"
 #include "settings/SettingsActivity.h"
 #include "util/FullScreenMessageActivity.h"
@@ -208,6 +209,10 @@ void ActivityManager::goToBrowser() {
   }
 }
 
+void ActivityManager::goToReadwiseLibrary() {
+  replaceActivity(std::make_unique<ReadwiseLibraryActivity>(renderer, mappedInput));
+}
+
 void ActivityManager::goToReader(std::string path, const bool allowFastInitialRefresh) {
   replaceActivity(std::make_unique<ReaderActivity>(renderer, mappedInput, std::move(path), allowFastInitialRefresh));
 }
@@ -232,6 +237,8 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem) {
       initialMenuItem = HomeMenuItem::RECENTS;
     } else if (activityName == "OpdsBookBrowser") {
       initialMenuItem = HomeMenuItem::OPDS_BROWSER;
+    } else if (activityName == "ReadwiseLibrary") {
+      initialMenuItem = HomeMenuItem::READWISE;
     } else if (activityName == "CrossPointWebServer") {
       initialMenuItem = HomeMenuItem::FILE_TRANSFER;
     } else if (activityName == "Settings") {

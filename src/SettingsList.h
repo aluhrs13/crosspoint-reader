@@ -15,6 +15,7 @@
 #include "CrossPointSettings.h"
 #include "KOReaderCredentialStore.h"
 #include "ReaderFontSizes.h"
+#include "ReadwiseCredentialStore.h"
 #include "activities/settings/SettingsActivity.h"
 #include "util/DictionaryRegistry.h"
 
@@ -370,6 +371,23 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
               KOREADER_STORE.saveToFile();
             },
             "koSyncBehavior", StrId::STR_KOREADER_SYNC),
+        // --- Readwise (web-only, uses ReadwiseCredentialStore). The web page
+        // is the comfortable path for entering a ~50-character opaque token. ---
+        SettingInfo::DynamicString(
+            StrId::STR_READWISE_TOKEN, [] { return READWISE_STORE.getToken(); },
+            [](const std::string& v) {
+              READWISE_STORE.setToken(v);
+              READWISE_STORE.saveToFile();
+            },
+            "readwiseToken", StrId::STR_READWISE),
+        SettingInfo::DynamicEnum(
+            StrId::STR_READWISE_SHOW_IN_HOME, {StrId::STR_STATE_OFF, StrId::STR_STATE_ON},
+            [] { return static_cast<uint8_t>(READWISE_STORE.isSyncEnabled()); },
+            [](uint8_t v) {
+              READWISE_STORE.setSyncEnabled(v != 0);
+              READWISE_STORE.saveToFile();
+            },
+            "readwiseEnabled", StrId::STR_READWISE),
         // --- Status Bar Settings (web-only, uses StatusBarSettingsActivity) ---
         SettingInfo::Toggle(StrId::STR_CHAPTER_PAGE_COUNT, &CrossPointSettings::statusBarChapterPageCount,
                             "statusBarChapterPageCount", StrId::STR_CUSTOMISE_STATUS_BAR),
