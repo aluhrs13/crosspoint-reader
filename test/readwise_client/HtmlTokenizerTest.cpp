@@ -7,12 +7,12 @@
 // on a fast connection and corrupts articles on a slow one, which is the worst
 // possible failure mode to debug on a device.
 
-#include "lib/Readwise/HtmlTokenizer.h"
-
 #include <gtest/gtest.h>
 
 #include <string>
 #include <vector>
+
+#include "lib/Readwise/HtmlTokenizer.h"
 
 using readwise::HtmlAttrCapture;
 using readwise::HtmlTokenHandler;
@@ -33,8 +33,7 @@ class RecordingHandler : public HtmlTokenHandler {
     return true;
   }
 
-  bool onStartTag(const char* name, size_t len, const HtmlAttrCapture* attrs,
-                  bool selfClosing) override {
+  bool onStartTag(const char* name, size_t len, const HtmlAttrCapture* attrs, bool selfClosing) override {
     log += "START(";
     log.append(name, len);
     if (attrs != nullptr) {
@@ -92,8 +91,8 @@ std::string tokenize(const std::string& html, size_t chunkSize, bool captureAttr
 
 void expectChunkInvariant(const std::string& html) {
   const std::string whole = tokenize(html, html.empty() ? 1 : html.size());
-  for (size_t chunk : {static_cast<size_t>(1), static_cast<size_t>(2), static_cast<size_t>(3),
-                       static_cast<size_t>(7), static_cast<size_t>(64)}) {
+  for (size_t chunk : {static_cast<size_t>(1), static_cast<size_t>(2), static_cast<size_t>(3), static_cast<size_t>(7),
+                       static_cast<size_t>(64)}) {
     EXPECT_EQ(tokenize(html, chunk), whole) << "differed at chunk size " << chunk << "\ninput: " << html;
   }
 }
@@ -122,27 +121,23 @@ TEST(HtmlTokenizer, CapturesTheAttributeAllowlist) {
   EXPECT_EQ(tokenize("<img src=a.jpg alt='Hi there'>", 64), "START(img src=a.jpg alt=Hi there)\n");
 
   // Attributes outside the allowlist are parsed but not stored.
-  EXPECT_EQ(tokenize("<img class=\"lead\" src=\"a.jpg\" data-x=\"1\">", 64),
-            "START(img src=a.jpg)\n");
+  EXPECT_EQ(tokenize("<img class=\"lead\" src=\"a.jpg\" data-x=\"1\">", 64), "START(img src=a.jpg)\n");
 
   // srcset is recorded as presence only -- picking a candidate would mean
   // guessing a viewport, and src is the better choice on a 1-bit panel.
-  EXPECT_EQ(tokenize("<img src=\"a.jpg\" srcset=\"a-2x.jpg 2x\">", 64),
-            "START(img src=a.jpg has-srcset)\n");
+  EXPECT_EQ(tokenize("<img src=\"a.jpg\" srcset=\"a-2x.jpg 2x\">", 64), "START(img src=a.jpg has-srcset)\n");
 }
 
 TEST(HtmlTokenizer, DecodesEntitiesInAttributeValues) {
   // A query string that survives &amp; is the difference between an image that
   // downloads and one that 404s.
-  EXPECT_EQ(tokenize("<img src=\"https://cdn/i?a=1&amp;b=2\">", 64),
-            "START(img src=https://cdn/i?a=1&b=2)\n");
+  EXPECT_EQ(tokenize("<img src=\"https://cdn/i?a=1&amp;b=2\">", 64), "START(img src=https://cdn/i?a=1&b=2)\n");
 }
 
 TEST(HtmlTokenizer, DropsRatherThanTruncatesAnOverlongSrc) {
   const std::string longUrl = "https://example.com/" + std::string(HtmlAttrCapture::SRC_CAP, 'x') + ".jpg";
   // Half a URL would download the wrong thing or nothing; the flag says why.
-  EXPECT_EQ(tokenize("<img src=\"" + longUrl + "\" alt=\"fallback\">", 64),
-            "START(img alt=fallback src-truncated)\n");
+  EXPECT_EQ(tokenize("<img src=\"" + longUrl + "\" alt=\"fallback\">", 64), "START(img alt=fallback src-truncated)\n");
 }
 
 TEST(HtmlTokenizer, ClearsAttributesBetweenTags) {
@@ -151,8 +146,7 @@ TEST(HtmlTokenizer, ClearsAttributesBetweenTags) {
 }
 
 TEST(HtmlTokenizer, ReportsSelfClosingAndEndTags) {
-  EXPECT_EQ(tokenize("<br/><hr /><p>x</p>", 64),
-            "START(br /)\nSTART(hr /)\nSTART(p)\nTXT(x)\nEND(p)\n");
+  EXPECT_EQ(tokenize("<br/><hr /><p>x</p>", 64), "START(br /)\nSTART(hr /)\nSTART(p)\nTXT(x)\nEND(p)\n");
 }
 
 TEST(HtmlTokenizer, MarksEntityTextLiteralAndSourceTextNot) {
@@ -163,8 +157,7 @@ TEST(HtmlTokenizer, MarksEntityTextLiteralAndSourceTextNot) {
 }
 
 TEST(HtmlTokenizer, SkipsRawTextContentButStillReportsItsTags) {
-  EXPECT_EQ(tokenize("<style>p { content: '</p>'; }</style>ok", 64),
-            "START(style)\nEND(style)\nTXT(ok)\n");
+  EXPECT_EQ(tokenize("<style>p { content: '</p>'; }</style>ok", 64), "START(style)\nEND(style)\nTXT(ok)\n");
 }
 
 TEST(HtmlTokenizer, AnAbortingHandlerStopsTheFeed) {

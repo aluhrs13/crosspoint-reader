@@ -6,11 +6,11 @@
 // ArticleImageUrl.h -- so the tests here mostly guard the two edges: what must
 // resolve correctly, and what must never be fetched.
 
-#include "lib/Readwise/ArticleImageUrl.h"
-
 #include <gtest/gtest.h>
 
 #include <string>
+
+#include "lib/Readwise/ArticleImageUrl.h"
 
 using readwise::ImageUrlResult;
 using readwise::resolveArticleImageUrl;
@@ -24,8 +24,7 @@ struct Resolved {
   std::string url;
 };
 
-Resolved resolve(const char* src, const char* base = kBase, const char* width = nullptr,
-                 const char* height = nullptr) {
+Resolved resolve(const char* src, const char* base = kBase, const char* width = nullptr, const char* height = nullptr) {
   char out[readwise::IMAGE_URL_CAP];
   const ImageUrlResult result = resolveArticleImageUrl(base, src, width, height, out, sizeof(out));
   return {result, std::string(out)};
@@ -90,8 +89,8 @@ TEST(ArticleImageUrl, RejectsWhatCannotOrShouldNotBeFetched) {
 TEST(ArticleImageUrl, RejectsFormatsWithNoDecoderOnDevice) {
   // Only JPEG and PNG have decoders (ImageDecoderFactory.cpp:14-40); fetching
   // the rest would spend bandwidth and SD space on bytes we then discard.
-  for (const char* src : {"/logo.svg", "/anim.gif", "/photo.webp", "/photo.avif", "/scan.tiff",
-                          "/icon.ico", "/old.bmp", "/UPPER.SVG"}) {
+  for (const char* src :
+       {"/logo.svg", "/anim.gif", "/photo.webp", "/photo.avif", "/scan.tiff", "/icon.ico", "/old.bmp", "/UPPER.SVG"}) {
     expectRejected(src, ImageUrlResult::UnsupportedType);
   }
   // The extension is read from the path, not the query.

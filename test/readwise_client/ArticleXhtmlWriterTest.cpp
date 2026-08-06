@@ -10,15 +10,14 @@
 // built with the same XML_GE=0 configuration as the firmware. If expat accepts
 // it, the device will too.
 
-#include "lib/Readwise/ArticleXhtmlWriter.h"
-
 #include <expat.h>
-
-#include "lib/Readwise/ArticleImageUrl.h"
 #include <gtest/gtest.h>
 
 #include <string>
 #include <vector>
+
+#include "lib/Readwise/ArticleImageUrl.h"
+#include "lib/Readwise/ArticleXhtmlWriter.h"
 
 using readwise::ArticleXhtmlWriter;
 
@@ -84,8 +83,7 @@ std::string parseError(const std::string& xml) {
 void expectWellFormed(const std::string& html, const char* what) {
   const Conversion result = convert(html);
   const std::string error = parseError(result.xhtml);
-  EXPECT_TRUE(error.empty()) << what << "\ninput:  " << html << "\noutput: " << result.xhtml
-                             << "\nexpat:  " << error;
+  EXPECT_TRUE(error.empty()) << what << "\ninput:  " << html << "\noutput: " << result.xhtml << "\nexpat:  " << error;
 }
 
 bool contains(const std::string& haystack, const std::string& needle) {
@@ -178,8 +176,7 @@ TEST(ArticleXhtmlWriter, RewritesImagesToLocalNamesAndReportsAbsoluteUrls) {
 // once magic-byte sniffing says what the image really is. If these offsets are
 // wrong the patch corrupts the markup instead.
 TEST(ArticleXhtmlWriter, ReportsExtensionOffsetsThatPointAtTheExtension) {
-  const Conversion result =
-      convert("<p><img src=\"/a.jpg\"><img src=\"/b.jpg\" alt=\"caption &amp; more\"></p>");
+  const Conversion result = convert("<p><img src=\"/a.jpg\"><img src=\"/b.jpg\" alt=\"caption &amp; more\"></p>");
 
   ASSERT_EQ(result.images.size(), 2u);
   for (const Image& image : result.images) {
@@ -243,9 +240,9 @@ TEST(ArticleXhtmlWriter, PreservesStructureWorthRendering) {
 }
 
 TEST(ArticleXhtmlWriter, DropsTablesAndOtherUnrenderableSubtrees) {
-  const Conversion result =
-      convert("<p>before</p><table><tr><td>cell</td></tr></table><p>after</p>"
-              "<form><input value=\"x\"><button>Go</button></form><p>end</p>");
+  const Conversion result = convert(
+      "<p>before</p><table><tr><td>cell</td></tr></table><p>after</p>"
+      "<form><input value=\"x\"><button>Go</button></form><p>end</p>");
 
   EXPECT_TRUE(parseError(result.xhtml).empty()) << result.xhtml;
   EXPECT_TRUE(contains(result.xhtml, "before"));
