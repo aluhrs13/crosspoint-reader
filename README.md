@@ -11,8 +11,8 @@ This fork adds an explicit, local-first sync client for
 background.
 
 - Browse **Later**, **Shortlist**, and unread **Feed** documents from the device.
-- Download article text during sync and cache it on the SD card for offline
-  reading.
+- Download articles during sync -- text, headings, emphasis, and inline images
+  -- and cache them on the SD card for offline reading.
 - Mark an article as seen when it is opened.
 - Archive an article with a long press and send that change to Readwise on the
   next sync.
@@ -52,6 +52,10 @@ an article; hold **Confirm** for one second to queue it for archiving. Run
   Readwise or provide two-way cross-device progress sync.
 - The Readwise **New** view is not synchronized. Feed sync retains unread items
   only.
+- Article images are downloaded during sync, capped at 24 per article and 3 MB
+  in total. JPEG and PNG render; other formats, and images that fail to
+  download, fall back to their alt text. Tables and article styling are not
+  carried over.
 - The token is XOR-obfuscated with a device-specific value and base64-encoded on
   the SD card, not encrypted; physical access to the card can expose it.
 - As with the existing CrossPoint network clients, Readwise HTTPS currently

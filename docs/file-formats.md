@@ -378,9 +378,9 @@ misreads existing caches. `Unknown` exists because the API's location set is
 open: `shortlist` occurs on real documents but is absent from Readwise's
 published documentation.
 
-`flags` bit 0 is `seen`; bit 1 records that a plain-text body has been cached at
-`bodies/<id>.txt`. Bit 1 is local-only state the server never reports, so it is
-carried across a sync rather than taken from the incoming record.
+`flags` bit 0 is `seen`; bit 1 records that a body has been cached at
+`bodies/<id>/article.epub`. Bit 1 is local-only state the server never reports,
+so it is carried across a sync rather than taken from the incoming record.
 
 `readingProgressPercent` is 0–100, narrowed from the API's 0–1 fraction. It is
 read-only: `PATCH /update/` accepts `reading_progress`, answers `200`, and
@@ -536,12 +536,35 @@ struct CheckpointBin {
 CheckpointBin checkpoint @ 0x00;
 ```
 
-### `bodies/<id>.txt`
+### `bodies/<id>/`
 
-Plain UTF-8 article text, stripped from the API's `html_content` as it streams.
-There is no header and no version: the file is either present or absent, and a
-truncated one is discarded and refetched.
+One directory per article, holding everything the article owns:
 
-Bodies are fetched when a document is opened rather than prefetched, and are
-deleted when the document moves to `archive` or `feed` or disappears from a
-completed reconciliation sweep.
+```text
+bodies/<id>/
+    article.epub      store-only (method 0) EPUB, written on device
+    epub_<hash>/      the reader's own cache: book.bin, sections, extracted
+                      images, .pxc pixel caches, cover/thumb bitmaps
+```
+
+`article.epub` is built from the API's `html_content` as it streams, and
+contains `mimetype`, `META-INF/container.xml`, `OEBPS/content.opf`,
+`OEBPS/article.xhtml`, and `OEBPS/images/<n>.jpg|png`. Store-only because JPEG
+and PNG do not deflate usefully and the firmware has no compressor -- miniz is
+built with `MINIZ_NO_DEFLATE_APIS`. There is no header and no version: the file
+is either present or absent, and a truncated one is never committed.
+
+The image filenames carry a *provisional* `.jpg` extension when the XHTML is
+written, because the local name has to exist before the bytes do. Each is
+patched in place to `.png` if magic-byte sniffing says so, which is possible
+only because both spellings are three characters. The decoder is selected from
+the filename, so this patch is what makes extensionless CDN URLs work.
+
+Putting the reader's cache inside the article directory means eviction is one
+recursive delete. Bodies are fetched during sync (or on demand when an
+uncached article is opened) and the whole directory is removed when the
+document moves to `archive` or `feed`, or disappears from a completed
+reconciliation sweep.
+
+Articles synced before this format existed were plain `bodies/<id>.txt` files.
+They are swept once on entering the library and re-downloaded.
