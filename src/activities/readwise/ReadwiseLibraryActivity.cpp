@@ -167,7 +167,13 @@ void ReadwiseLibraryActivity::loop() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+#ifdef CROSSPOINT_READWISE_ONLY
+    // This library IS home in the Readwise-only build; Back opens Settings
+    // (whose Back returns here via the re-routed goHome()).
+    activityManager.goToSettings();
+#else
     onGoHome();
+#endif
     return;
   }
 

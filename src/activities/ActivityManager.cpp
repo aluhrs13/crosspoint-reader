@@ -5,20 +5,23 @@
 
 #include <algorithm>
 
-#include "OpdsServerStore.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
-#include "browser/OpdsBookBrowserActivity.h"
 #include "home/CrashActivity.h"
+#include "reader/ReaderActivity.h"
+#include "readwise/ReadwiseLibraryActivity.h"
+#include "settings/SettingsActivity.h"
+#include "util/FullScreenMessageActivity.h"
+
+#ifndef CROSSPOINT_READWISE_ONLY
+#include "OpdsServerStore.h"
+#include "browser/OpdsBookBrowserActivity.h"
 #include "home/FileBrowserActivity.h"
 #include "home/HomeActivity.h"
 #include "home/RecentBooksActivity.h"
 #include "network/CrossPointWebServerActivity.h"
-#include "reader/ReaderActivity.h"
-#include "readwise/ReadwiseLibraryActivity.h"
 #include "settings/OpdsServerListActivity.h"
-#include "settings/SettingsActivity.h"
-#include "util/FullScreenMessageActivity.h"
+#endif
 
 static portMUX_TYPE activityManagerSpinlock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -185,6 +188,22 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
   }
 }
 
+#ifdef CROSSPOINT_READWISE_ONLY
+// Readwise-only build: these destinations are compiled out, so any surviving
+// call site dead-ends safely at the Readwise library (the variant's "home").
+void ActivityManager::goToFileTransfer() { goHome(); }
+
+void ActivityManager::goToSettings() { replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToFileBrowser(std::string path) {
+  (void)path;
+  goHome();
+}
+
+void ActivityManager::goToRecentBooks() { goHome(); }
+
+void ActivityManager::goToBrowser() { goHome(); }
+#else
 void ActivityManager::goToFileTransfer() {
   replaceActivity(std::make_unique<CrossPointWebServerActivity>(renderer, mappedInput));
 }
@@ -208,6 +227,7 @@ void ActivityManager::goToBrowser() {
     replaceActivity(std::make_unique<OpdsServerListActivity>(renderer, mappedInput, true));
   }
 }
+#endif
 
 void ActivityManager::goToReadwiseLibrary() {
   replaceActivity(std::make_unique<ReadwiseLibraryActivity>(renderer, mappedInput));
@@ -229,6 +249,11 @@ void ActivityManager::goToFullScreenMessage(std::string message, EpdFontFamily::
 }
 
 void ActivityManager::goHome(HomeMenuItem initialMenuItem) {
+#ifdef CROSSPOINT_READWISE_ONLY
+  // Readwise-only build: the Readwise library IS the home screen.
+  (void)initialMenuItem;
+  replaceActivity(std::make_unique<ReadwiseLibraryActivity>(renderer, mappedInput));
+#else
   if (initialMenuItem == HomeMenuItem::NONE && currentActivity) {
     const auto& activityName = currentActivity->name;
     if (activityName == "FileBrowser") {
@@ -246,6 +271,7 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem) {
     }
   }
   replaceActivity(std::make_unique<HomeActivity>(renderer, mappedInput, initialMenuItem));
+#endif
 }
 void ActivityManager::goToCrashReport() { replaceActivity(std::make_unique<CrashActivity>(renderer, mappedInput)); }
 
