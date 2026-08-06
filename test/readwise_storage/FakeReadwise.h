@@ -37,7 +37,15 @@ class FakeFileStore : public readwise::ReadwiseFileStore {
     return true;
   }
 
+  // Fails the Nth readRange (1-based); 0 disables. Simulates a source file
+  // going unreadable partway through a copy, which a plain "delete the file"
+  // cannot reproduce because size() is consulted before the copy begins.
+  void failAtRead(int n) { failReadAt_ = n; }
+
   int readRange(const std::string& path, size_t offset, uint8_t* buf, size_t bufCap) override {
+    if (failReadAt_ > 0 && ++readCount_ == failReadAt_) {
+      return -1;
+    }
     auto it = files_.find(path);
     if (it == files_.end() || offset > it->second.size()) {
       return -1;
@@ -127,6 +135,8 @@ class FakeFileStore : public readwise::ReadwiseFileStore {
   bool writeOpen_ = false;
   int failAt_ = 0;
   int writeCount_ = 0;
+  int failReadAt_ = 0;
+  int readCount_ = 0;
 };
 
 class FakeApi : public readwise::ReadwiseApi {
