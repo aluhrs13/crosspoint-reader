@@ -20,14 +20,18 @@
 #include "BookmarkEntry.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#ifndef CROSSPOINT_READWISE_ONLY
 #include "DictionaryWordSelectActivity.h"
+#endif
 #include "EpubReaderBookmarksActivity.h"
 #include "EpubReaderChapterSelectionActivity.h"
 #include "EpubReaderFootnotesActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
 #include "KOReaderCredentialStore.h"
+#ifndef CROSSPOINT_READWISE_ONLY
 #include "KOReaderSyncActivity.h"
+#endif
 #include "MappedInputManager.h"
 #include "ProgressMapper.h"
 #include "QrDisplayActivity.h"
@@ -305,6 +309,10 @@ void EpubReaderActivity::showBuildPopup() {
 }
 
 void EpubReaderActivity::openDictionaryWordSelect() {
+#ifdef CROSSPOINT_READWISE_ONLY
+  // Dictionary support is compiled out of the Readwise-only build.
+  return;
+#else
   if (SETTINGS.dictionaryName[0] == '\0') {
     showDictionaryMessage = true;
     dictionaryMessageTime = millis();
@@ -325,6 +333,7 @@ void EpubReaderActivity::openDictionaryWordSelect() {
   startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(renderer, mappedInput, std::move(page),
                                                                         orientedMarginLeft, orientedMarginTop),
                          [this](const ActivityResult&) { requestUpdate(); });
+#endif
 }
 
 void EpubReaderActivity::loop() {
@@ -951,6 +960,10 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
 }
 
 bool EpubReaderActivity::launchKOReaderSync() {
+#ifdef CROSSPOINT_READWISE_ONLY
+  // KOReader sync is compiled out of the Readwise-only build.
+  return false;
+#else
   if (!KOREADER_STORE.hasCredentials()) return false;  // no-op: nothing to launch
 
   const int currentPage = section ? section->currentPage : nextPageNumber;
@@ -1000,6 +1013,7 @@ bool EpubReaderActivity::launchKOReaderSync() {
       renderer, mappedInput, savedEpubPath, currentSpineIndex, currentPage, totalPages, std::move(localKoPos),
       std::move(localChapterName), paragraphIndex));
   return true;  // acted: launched the sync activity
+#endif
 }
 
 void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
