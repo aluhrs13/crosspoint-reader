@@ -97,7 +97,7 @@ jobs:
         # before the artifact upload.
         run: |
           set -euo pipefail
-          pio run -e default -e sticky | tee pio.log
+          pio run -e default -e sticky -e readwise | tee pio.log
 
       - name: Extract firmware stats
 
