@@ -141,6 +141,10 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   loadCheckpoint(checkpoint);
 
   std::vector<StagedRef> staged;
+  // Sized for the records; the tombstones a pull may add on top are bounded by
+  // the feed page walk but are rare enough (one per item read elsewhere since
+  // the last sync) that reserving for the worst case would cost more DRAM than
+  // the occasional growth.
   staged.reserve(static_cast<size_t>(documentCap_) + feedCap_);
   char highestUpdatedAt[TIMESTAMP_CAP] = {};
   copyBounded(highestUpdatedAt, TIMESTAMP_CAP, checkpoint.updatedAfter, strlen(checkpoint.updatedAfter));
@@ -152,7 +156,11 @@ SyncOutcome ReadwiseSyncEngine::sync() {
     outcome.status = pullStatus;
     return outcome;
   }
-  outcome.pulled = static_cast<uint16_t>(staged.size());
+  for (const StagedRef& ref : staged) {
+    if (!ref.isTombstone()) {
+      ++outcome.pulled;
+    }
+  }
 
   // --- 4. Merge and rebuild indexes --------------------------------------
   outcome.failedStage = SyncStage::RebuildingIndexes;
@@ -234,9 +242,19 @@ ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::v
       engine->applyQueuedOverrides(copy);
 
       if (unreadOnly && (copy.flags & FLAG_SEEN) != 0) {
-        // A read document in an unread-only location is never staged, but its
-        // updated_at still advances the checkpoint -- otherwise the same read
-        // items would be re-walked on every sync.
+        // A read document in an unread-only location is never staged, but a copy
+        // may already be cached from when it was unread -- reading it on another
+        // device is only ever observed here, in the pull. Record a tombstone so
+        // the merge drops that cached copy; without one the stale unread record
+        // is never superseded and survives carry-over forever.
+        //
+        // Its updated_at still advances the checkpoint -- otherwise the same
+        // read items would be re-walked on every sync.
+        StagedRef ref{};
+        copyBounded(ref.id, ID_CAP, copy.id, strlen(copy.id));
+        ref.offset = 0;
+        ref.length = 0;
+        staged->push_back(ref);
         advanceCursor(copy);
         return true;
       }
@@ -446,6 +464,13 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
   };
 
   for (const StagedRef& ref : staged) {
+    if (ref.isTombstone()) {
+      // Nothing to write: the ref exists so the carry-over pass treats the
+      // cached copy as superseded. Its body goes with it. Handled before the cap
+      // break below, so a full cap never leaks a body.
+      store_.remove(bodyPath(ref.id));
+      continue;
+    }
     if (nonFeedWritten >= documentCap_ && feedWritten >= feedCap_) {
       break;
     }
