@@ -6,7 +6,8 @@
 #include <cstring>
 #include <utility>
 
-#include "BodyTextWriter.h"
+#include "ArticleAssembler.h"
+#include "ArticleBodyWriter.h"
 
 namespace readwise {
 namespace {
@@ -56,9 +57,11 @@ std::string ReadwiseSyncEngine::indexPath(Location location) const {
   return baseDir_ + "/index_" + locationName(location) + ".bin";
 }
 
-std::string ReadwiseSyncEngine::bodyPath(const char* id) const {
-  return baseDir_ + "/bodies/" + (id != nullptr ? id : "") + ".txt";
+std::string ReadwiseSyncEngine::articleDir(const char* id) const {
+  return baseDir_ + "/bodies/" + (id != nullptr ? id : "");
 }
+
+std::string ReadwiseSyncEngine::bodyPath(const char* id) const { return articleDir(id) + "/article.epub"; }
 
 bool ReadwiseSyncEngine::loadCheckpoint(Checkpoint& out) {
   uint8_t buffer[CHECKPOINT_SIZE];
@@ -409,7 +412,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
     if ((doc.flags & FLAG_HAS_BODY) == 0) {
       return;
     }
-    store_.remove(bodyPath(doc.id));
+    store_.removeTree(articleDir(doc.id));
     doc.flags &= static_cast<uint8_t>(~FLAG_HAS_BODY);
   };
 
@@ -429,7 +432,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       drop = policy != nullptr && policy->unreadOnly && (doc.flags & FLAG_SEEN) != 0;
     }
     if (drop && (doc.flags & FLAG_HAS_BODY) != 0) {
-      store_.remove(bodyPath(doc.id));
+      store_.removeTree(articleDir(doc.id));
     }
     return drop;
   };
@@ -464,7 +467,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
     if (classWritten >= (isFeed ? feedCap_ : documentCap_)) {
       if (isFeed && (scratchDoc_.flags & FLAG_HAS_BODY) != 0) {
         // A feed item displaced by the cap is gone for good; reclaim its body.
-        store_.remove(bodyPath(scratchDoc_.id));
+        store_.removeTree(articleDir(scratchDoc_.id));
       }
       continue;
     }
@@ -517,7 +520,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       if (classWritten >= (isFeed ? feedCap_ : documentCap_)) {
         if (isFeed && (scratchDoc_.flags & FLAG_HAS_BODY) != 0) {
           // Displaced by newer staged feed items; reclaim the body.
-          store_.remove(bodyPath(scratchDoc_.id));
+          store_.removeTree(articleDir(scratchDoc_.id));
         }
         continue;
       }
@@ -784,8 +787,17 @@ ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(co
   uint16_t done = 0;
   for (const MissingId& entry : missing) {
     ApiStatus status = ApiStatus::NetworkError;
+    // Relative image srcs resolve against source_url, and the OPF wants the
+    // title and author, so the record is re-read rather than carried through
+    // the scan (which only kept ids, to bound the missing list).
+    const bool haveDoc = findDocument(entry.id, scratchDoc_);
+    store_.ensureDir(articleDir(entry.id));
+    const std::string xhtmlPath = articleDir(entry.id) + "/.body.xhtml";
+    const std::string scratchPath = articleDir(entry.id) + "/.img.tmp";
+
     for (int attempt = 0; attempt < 1 + MAX_RATE_LIMIT_RETRIES; ++attempt) {
-      auto writer = makeUniqueNoThrow<BodyTextWriter>(store_, bodyPath(entry.id));
+      auto writer = makeUniqueNoThrow<ArticleBodyWriter>(store_, xhtmlPath, haveDoc ? scratchDoc_.sourceUrl : "",
+                                                         haveDoc ? scratchDoc_.title : "");
       if (!writer) {
         status = ApiStatus::LowMemory;
         break;
@@ -795,6 +807,23 @@ ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(co
       if (status == ApiStatus::Ok && !writer->committed()) {
         // 200 with no html_content string: nothing to retry.
         status = ApiStatus::ParseError;
+      }
+      if (status == ApiStatus::Ok) {
+        // Images are fetched here, after the body's TLS session has closed --
+        // a nested request inside the read callback is impossible, and this is
+        // also the heap's worst moment. A failure to assemble is a failure to
+        // cache; a failure to fetch any individual image is not.
+        NullArticleImageFetcher noImages;
+        ArticleImageFetcher& fetcher =
+            hooks.imageFetcher != nullptr ? *hooks.imageFetcher : static_cast<ArticleImageFetcher&>(noImages);
+        const ArticleAssemblyResult assembly =
+            assembleArticleEpub(store_, fetcher, *writer, xhtmlPath, scratchPath, bodyPath(entry.id),
+                                haveDoc ? scratchDoc_.title : "", haveDoc ? scratchDoc_.author : "");
+        if (!assembly.ok) {
+          store_.remove(xhtmlPath);
+          store_.remove(scratchPath);
+          status = ApiStatus::ParseError;
+        }
       }
       if (status != ApiStatus::RateLimited) {
         break;
@@ -974,7 +1003,7 @@ SyncOutcome ReadwiseSyncEngine::reconcile() {
       survivors.push_back(ref);
     } else {
       // The body cache goes with the document.
-      store_.remove(bodyPath(scratchDoc_.id));
+      store_.removeTree(articleDir(scratchDoc_.id));
       ++outcome.pulled;
     }
     readOffset += static_cast<uint32_t>(consumed);

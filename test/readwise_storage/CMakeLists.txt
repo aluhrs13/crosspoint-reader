@@ -2,15 +2,18 @@ add_executable(ReadwiseStorageTest
   ReadwiseCodecTest.cpp
   ReadwiseSyncEngineTest.cpp
   ZipWriterTest.cpp
+  ArticleAssemblerTest.cpp
   ZipWriterExternalTest.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseDocument.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseCodec.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseJournal.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseSyncEngine.cpp
-  ${REPO_ROOT}/lib/Readwise/BodyTextWriter.cpp
-  ${REPO_ROOT}/lib/Readwise/HtmlTextExtractor.cpp
   ${REPO_ROOT}/lib/Readwise/HtmlTokenizer.cpp
   ${REPO_ROOT}/lib/Readwise/ZipWriter.cpp
+  ${REPO_ROOT}/lib/Readwise/ArticleImageUrl.cpp
+  ${REPO_ROOT}/lib/Readwise/ArticleXhtmlWriter.cpp
+  ${REPO_ROOT}/lib/Readwise/ArticleBodyWriter.cpp
+  ${REPO_ROOT}/lib/Readwise/ArticleAssembler.cpp
 )
 
 target_include_directories(ReadwiseStorageTest PRIVATE

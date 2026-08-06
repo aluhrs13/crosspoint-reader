@@ -42,7 +42,12 @@ std::unique_ptr<Epub> ReaderActivity::loadEpub(const std::string& path) {
     return nullptr;
   }
 
-  auto epub = makeUniqueNoThrow<Epub>(path, "/.crosspoint");
+  // A managed article keeps its cache inside its own directory, beside the
+  // archive, so archiving the article removes the sections, extracted images,
+  // and pixel caches in the same recursive delete. A shared /.crosspoint would
+  // leave orphaned epub_<hash> directories with no owner.
+  const std::string articleDir = ReadwiseUi::articleDirForBodyPath(path);
+  auto epub = makeUniqueNoThrow<Epub>(path, articleDir.empty() ? "/.crosspoint" : articleDir);
   if (!epub) {
     LOG_ERR("READER", "Failed to allocate EPUB object");
     return nullptr;
@@ -120,8 +125,16 @@ void ReaderActivity::goToLibrary(const std::string& fromBookPath) {
 void ReaderActivity::onGoToEpubReader(std::unique_ptr<Epub> epub) {
   const auto epubPath = epub->getPath();
   currentBookPath = epubPath;
-  activityManager.replaceActivity(
-      std::make_unique<EpubReaderActivity>(renderer, mappedInput, std::move(epub), initialRefreshCountdown()));
+  // A Readwise article opens managed: library-owned title, Back to the
+  // library, no recents entry. This also covers resume-after-restart, where
+  // the managed context would otherwise be lost.
+  EpubManagedDocInfo managed;
+  if (ReadwiseUi::isBodyPath(epubPath)) {
+    managed.managed = true;
+    managed.title = ReadwiseUi::titleForBodyPath(epubPath);
+  }
+  activityManager.replaceActivity(std::make_unique<EpubReaderActivity>(renderer, mappedInput, std::move(epub),
+                                                                       initialRefreshCountdown(), std::move(managed)));
 }
 
 void ReaderActivity::onGoToBmpViewer(const std::string& path) {
@@ -138,16 +151,8 @@ void ReaderActivity::onGoToXtcReader(std::unique_ptr<Xtc> xtc) {
 void ReaderActivity::onGoToTxtReader(std::unique_ptr<Txt> txt) {
   const auto txtPath = txt->getPath();
   currentBookPath = txtPath;
-  // A Readwise body opens managed: library-owned title, Back to the library,
-  // no recents entry. This also covers resume-after-restart, where the managed
-  // context would otherwise be lost.
-  TxtManagedDocInfo managed;
-  if (ReadwiseUi::isBodyPath(txtPath)) {
-    managed.managed = true;
-    managed.title = ReadwiseUi::titleForBodyPath(txtPath);
-  }
-  activityManager.replaceActivity(std::make_unique<TxtReaderActivity>(renderer, mappedInput, std::move(txt),
-                                                                      initialRefreshCountdown(), std::move(managed)));
+  activityManager.replaceActivity(
+      std::make_unique<TxtReaderActivity>(renderer, mappedInput, std::move(txt), initialRefreshCountdown()));
 }
 
 void ReaderActivity::onEnter() {

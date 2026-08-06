@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "ArticleAssembler.h"
 #include "ReadwiseApi.h"
 #include "ReadwiseCodec.h"
 #include "ReadwiseFileStore.h"
@@ -135,6 +136,11 @@ class ReadwiseSyncEngine {
     // Blocking wait; the activity supplies delay(). Never called with more
     // than RATE_LIMIT_WAIT_CAP_MS.
     void (*sleepMs)(void* ctx, uint32_t ms) = nullptr;
+    // Supplies image bytes during assembly. Optional: without it articles are
+    // still built and read correctly, their images degrading to alt text.
+    // Injected rather than constructed here so the engine stays free of
+    // network headers and host-testable.
+    ArticleImageFetcher* imageFetcher = nullptr;
   };
   struct BodySyncOutcome {
     bool ok = false;
@@ -168,6 +174,10 @@ class ReadwiseSyncEngine {
   std::string journalPath() const { return baseDir_ + "/journal.bin"; }
   std::string checkpointPath() const { return baseDir_ + "/checkpoint.bin"; }
   std::string indexPath(Location location) const;
+  // An article is a directory, not a file: the archive plus the Epub cache the
+  // reader builds beside it (sections, extracted images, pixel caches, cover).
+  // Keeping them together makes eviction one recursive delete.
+  std::string articleDir(const char* id) const;
   std::string bodyPath(const char* id) const;
 
  private:

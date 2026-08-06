@@ -38,6 +38,11 @@ class ReadwiseFileStore {
 
   virtual bool exists(const std::string& path) = 0;
   virtual bool remove(const std::string& path) = 0;
+  // Removes a directory and everything under it. An article is a directory --
+  // archive, section cache, extracted images, pixel caches, generated cover --
+  // so evicting one is a single recursive delete rather than a list of paths
+  // the caller would have to keep in step with the reader.
+  virtual bool removeTree(const std::string& path) = 0;
   // Returns the file size, or -1 if absent or unreadable.
   virtual long size(const std::string& path) = 0;
   virtual bool ensureDir(const std::string& path) = 0;

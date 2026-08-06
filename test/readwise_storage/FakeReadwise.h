@@ -69,6 +69,20 @@ class FakeFileStore : public readwise::ReadwiseFileStore {
 
   bool remove(const std::string& path) override { return files_.erase(path) != 0; }
 
+  bool removeTree(const std::string& path) override {
+    const std::string prefix = path.back() == '/' ? path : path + "/";
+    bool removed = files_.erase(path) != 0;
+    for (auto it = files_.begin(); it != files_.end();) {
+      if (it->first.rfind(prefix, 0) == 0) {
+        it = files_.erase(it);
+        removed = true;
+      } else {
+        ++it;
+      }
+    }
+    return removed;
+  }
+
   long size(const std::string& path) override {
     auto it = files_.find(path);
     return it == files_.end() ? -1 : static_cast<long>(it->second.size());

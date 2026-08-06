@@ -47,6 +47,8 @@ class ReadwiseLibraryActivity final : public Activity {
   void openDocument(const readwise::Document& doc);
   void startDownload(const readwise::Document& doc);
   void performDownload();
+  void migrateLegacyTextBodies();
+  static void sImageProgress(void* ctx, size_t done, size_t total);
   void queueArchive(const readwise::Document& doc);
   void jumpToLocation(int index);
   // Direct-jump targets for the Left/Right buttons: from Later they lead to
@@ -80,6 +82,10 @@ class ReadwiseLibraryActivity final : public Activity {
   std::string pendingDownloadId;
   std::string pendingDownloadTitle;
   std::string pendingDownloadRev;
+  // Relative image srcs resolve against source_url, and the OPF wants the
+  // author, so both are carried from the row rather than re-read later.
+  std::string pendingDownloadSourceUrl;
+  std::string pendingDownloadAuthor;
   bool pendingDownloadSeen = false;
   std::string statusMessage;
   // Set when a hold has already archived, so the following Confirm release

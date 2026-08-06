@@ -11,6 +11,7 @@
 #include <cstdio>
 
 #include "ReadwiseCredentialStore.h"
+#include "ReadwiseImageFetcher.h"
 #include "ReadwiseSupport.h"
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
@@ -110,6 +111,10 @@ void ReadwiseSyncActivity::performSync() {
       self->requestUpdate(true);
     };
     hooks.sleepMs = [](void*, uint32_t ms) { delay(ms); };
+    // Wi-Fi is already up for the metadata pass, so article images ride along
+    // with it and reading stays fully offline afterwards.
+    ReadwiseUi::HttpArticleImageFetcher imageFetcher;
+    hooks.imageFetcher = &imageFetcher;
     const auto bodies = engine->downloadMissingBodies(hooks);
     engine.reset();
 

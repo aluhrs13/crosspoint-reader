@@ -18,7 +18,6 @@ target_compile_definitions(crosspoint_expat PUBLIC
 
 add_executable(ReadwiseClientTest
   ReadwiseClientTest.cpp
-  HtmlTextExtractorTest.cpp
   HtmlTokenizerTest.cpp
   ArticleXhtmlWriterTest.cpp
   ArticleImageUrlTest.cpp
@@ -28,11 +27,9 @@ add_executable(ReadwiseClientTest
   ${REPO_ROOT}/lib/Readwise/ReadwiseCodec.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseListParser.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseClientCore.cpp
-  ${REPO_ROOT}/lib/Readwise/HtmlTextExtractor.cpp
   ${REPO_ROOT}/lib/Readwise/HtmlTokenizer.cpp
   ${REPO_ROOT}/lib/Readwise/ArticleImageUrl.cpp
   ${REPO_ROOT}/lib/Readwise/ArticleXhtmlWriter.cpp
-  ${REPO_ROOT}/lib/Readwise/BodyTextWriter.cpp
 )
 
 target_include_directories(ReadwiseClientTest PRIVATE

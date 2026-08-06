@@ -22,6 +22,7 @@ class SdReadwiseFileStore : public ReadwiseFileStore {
   bool writeRange(const std::string& path, size_t offset, const uint8_t* data, size_t len) override;
   bool exists(const std::string& path) override;
   bool remove(const std::string& path) override;
+  bool removeTree(const std::string& path) override;
   long size(const std::string& path) override;
   bool ensureDir(const std::string& path) override;
 

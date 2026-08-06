@@ -1,6 +1,7 @@
 #include "ReadwiseLibraryActivity.h"
 
-#include <BodyTextWriter.h>
+#include <ArticleAssembler.h>
+#include <ArticleBodyWriter.h>
 #include <GfxRenderer.h>
 #include <HttpReadwiseApi.h>
 #include <I18n.h>
@@ -12,6 +13,7 @@
 
 #include "CrossPointState.h"
 #include "ReadwiseCredentialStore.h"
+#include "ReadwiseImageFetcher.h"
 #include "ReadwiseSupport.h"
 #include "ReadwiseSyncActivity.h"
 #include "SilentRestart.h"
@@ -39,6 +41,42 @@ const char* locationLabel(const readwise::Location location) {
 }
 }  // namespace
 
+// Bodies used to be plain text at bodies/<id>.txt; they are now EPUB archives
+// at bodies/<id>/article.epub. The old files no longer match any path the
+// library looks for, so without this they would sit on the card forever with
+// nothing owning them. Clearing the flag makes the next sync re-fetch the
+// article -- this time with its images.
+void ReadwiseLibraryActivity::migrateLegacyTextBodies() {
+  const std::string bodiesDir = std::string(ReadwiseCredentialStore::getDataDir()) + "/bodies";
+  HalFile dir = Storage.open(bodiesDir.c_str());
+  if (!dir || !dir.isDirectory()) {
+    return;
+  }
+
+  int migrated = 0;
+  for (auto entry = dir.openNextFile(); entry; entry = dir.openNextFile()) {
+    char name[64];
+    if (entry.isDirectory() || entry.getName(name, sizeof(name)) == 0) {
+      continue;
+    }
+    const std::string fileName(name);
+    if (fileName.size() < 5 || fileName.compare(fileName.size() - 4, 4, ".txt") != 0) {
+      continue;
+    }
+    const std::string id = fileName.substr(0, fileName.size() - 4);
+    entry.close();  // must close before removing the same path
+    if (Storage.remove((bodiesDir + "/" + fileName).c_str())) {
+      ++migrated;
+    }
+    if (engine) {
+      engine->setBodyCached(id.c_str(), false);
+    }
+  }
+  if (migrated > 0) {
+    LOG_INF("RWLIB", "Migrated %d legacy text bodies; they re-download with images", migrated);
+  }
+}
+
 void ReadwiseLibraryActivity::onEnter() {
   Activity::onEnter();
   engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(nullApi, store, ReadwiseCredentialStore::getDataDir());
@@ -51,6 +89,7 @@ void ReadwiseLibraryActivity::onEnter() {
     // left visible-state stale.
     engine->rebuildLocal();
   }
+  migrateLegacyTextBodies();
   selectedIndex = 0;
   state = State::LIST;
   reloadCounts();
@@ -234,6 +273,8 @@ void ReadwiseLibraryActivity::startDownload(const readwise::Document& doc) {
   pendingDownloadId = doc.id;
   pendingDownloadTitle = doc.title;
   pendingDownloadRev = doc.updatedAt;
+  pendingDownloadSourceUrl = doc.sourceUrl;
+  pendingDownloadAuthor = doc.author;
   pendingDownloadSeen = (doc.flags & readwise::FLAG_SEEN) != 0;
   if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
     performDownload();
@@ -250,6 +291,20 @@ void ReadwiseLibraryActivity::startDownload(const readwise::Document& doc) {
                          });
 }
 
+// Images can take several seconds each on a slow connection; without this the
+// popup would sit on the title alone and read as a hang.
+void ReadwiseLibraryActivity::sImageProgress(void* ctx, size_t done, size_t total) {
+  auto* self = static_cast<ReadwiseLibraryActivity*>(ctx);
+  if (total == 0) {
+    return;
+  }
+  {
+    RenderLock lock(*self);
+    self->statusMessage = self->pendingDownloadTitle + " (" + std::to_string(done) + "/" + std::to_string(total) + ")";
+  }
+  self->requestUpdate();
+}
+
 void ReadwiseLibraryActivity::performDownload() {
   {
     RenderLock lock(*this);
@@ -260,16 +315,23 @@ void ReadwiseLibraryActivity::performDownload() {
   wifiActivated = true;
 
   const std::string bodyPath = ReadwiseUi::bodyPathForId(pendingDownloadId.c_str());
+  const std::string articleDir = ReadwiseUi::articleDirForId(pendingDownloadId.c_str());
   readwise::ApiStatus status = readwise::ApiStatus::LowMemory;
   if (!bodyPath.empty()) {
-    // Nothing else creates the bodies directory -- sync only ensures the base
+    // Nothing else creates these directories -- sync only ensures the base
     // dir -- and SdFat's open-for-write fails outright on a missing parent,
     // which aborted the very first article download as a ParseError.
     store.ensureDir(std::string(ReadwiseCredentialStore::getDataDir()) + "/bodies");
+    store.ensureDir(articleDir);
+    const std::string xhtmlPath = articleDir + "/.body.xhtml";
+    const std::string scratchPath = articleDir + "/.img.tmp";
+
     readwise::HttpReadwiseApi api(READWISE_STORE.getToken());
-    // The writer carries the extractor's output buffer (~400 bytes of state)
-    // and sits under a live TLS session -- heap, not the main-loop stack.
-    auto writer = makeUniqueNoThrow<readwise::BodyTextWriter>(store, bodyPath);
+    // The writer carries the tokenizer, the XHTML emitter, and the image URL
+    // arena (~4.6 KB) and sits under a live TLS session -- heap, not the
+    // main-loop stack.
+    auto writer = makeUniqueNoThrow<readwise::ArticleBodyWriter>(store, xhtmlPath, pendingDownloadSourceUrl.c_str(),
+                                                                 pendingDownloadTitle.c_str());
     if (!writer) {
       LOG_ERR("RWLIB", "OOM: body writer");
     } else {
@@ -278,6 +340,24 @@ void ReadwiseLibraryActivity::performDownload() {
       if (status == readwise::ApiStatus::Ok && !writer->committed()) {
         // A 200 whose body never arrived (document without html_content).
         status = readwise::ApiStatus::ParseError;
+      }
+      if (status == readwise::ApiStatus::Ok) {
+        // Images come after the body's TLS session closes: a nested request
+        // inside the read callback is impossible, and this is the heap's worst
+        // moment. Individual image failures degrade to alt text and must not
+        // cost the article, so only assembly itself can fail the download.
+        ReadwiseUi::HttpArticleImageFetcher fetcher;
+        const readwise::ArticleAssemblyResult assembly = readwise::assembleArticleEpub(
+            store, fetcher, *writer, xhtmlPath, scratchPath, bodyPath, pendingDownloadTitle.c_str(),
+            pendingDownloadAuthor.c_str(), &sImageProgress, this);
+        if (!assembly.ok) {
+          store.remove(xhtmlPath);
+          store.remove(scratchPath);
+          status = readwise::ApiStatus::ParseError;
+        } else {
+          LOG_INF("RWLIB", "Article assembled: %u/%u images", static_cast<unsigned>(assembly.imagesStored),
+                  static_cast<unsigned>(assembly.imagesRequested));
+        }
       }
     }
   }

@@ -40,11 +40,7 @@ void TxtReaderActivity::onEnter() {
   auto fileName = filePath.substr(filePath.rfind('/') + 1);
   APP_STATE.openEpubPath = filePath;
   APP_STATE.saveToFile();
-  if (!managedDoc.managed) {
-    // Managed Readwise documents live in their own library, not in Recents --
-    // and their filename is an opaque ULID that would pollute the list.
-    RECENT_BOOKS.addBook(filePath, fileName, "", "");
-  }
+  RECENT_BOOKS.addBook(filePath, fileName, "", "");
 
   // Trigger first update
   requestUpdate();
@@ -64,17 +60,8 @@ void TxtReaderActivity::onExit() {
 }
 
 void TxtReaderActivity::loop() {
-  if (managedDoc.managed) {
-    // A managed document came from the Readwise library, so Back returns
-    // there; the file-browser fallback would strand the user in the bodies
-    // cache directory.
-    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-      activityManager.goToReadwiseLibrary();
-      return;
-    }
-  } else if (ReaderUtils::handleBackNavigation(
-                 mappedInput, activityManager, txt ? txt->getPath().c_str() : "",
-                 {this, [](void* ctx) { static_cast<TxtReaderActivity*>(ctx)->onGoHome(); }})) {
+  if (ReaderUtils::handleBackNavigation(mappedInput, activityManager, txt ? txt->getPath().c_str() : "",
+                                        {this, [](void* ctx) { static_cast<TxtReaderActivity*>(ctx)->onGoHome(); }})) {
     return;
   }
 
@@ -424,7 +411,7 @@ void TxtReaderActivity::renderStatusBar() const {
   const float progress = totalPages > 0 ? (currentPage + 1) * 100.0f / totalPages : 0;
   std::string title;
   if (SETTINGS.statusBarSpec().showsTitle()) {
-    title = managedDoc.managed && !managedDoc.title.empty() ? managedDoc.title : txt->getTitle();
+    title = txt->getTitle();
   }
   GUI.drawStatusBar(renderer, progress, currentPage + 1, totalPages, title);
 }

@@ -51,6 +51,8 @@ bool SdReadwiseFileStore::exists(const std::string& path) { return Storage.exist
 
 bool SdReadwiseFileStore::remove(const std::string& path) { return Storage.remove(path.c_str()); }
 
+bool SdReadwiseFileStore::removeTree(const std::string& path) { return Storage.removeDir(path.c_str()); }
+
 long SdReadwiseFileStore::size(const std::string& path) {
   HalFile file;
   if (!Storage.openFileForRead("RWS", path, file)) {
