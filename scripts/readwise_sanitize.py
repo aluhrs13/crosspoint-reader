@@ -48,6 +48,7 @@ class Sanitizer:
 
     def __init__(self):
         self.id_map = {}
+        self.num_map = {}
 
     def doc_id(self, real):
         if real is None:
@@ -136,6 +137,37 @@ class Sanitizer:
         if isinstance(out.get("tags"), dict) and out["tags"]:
             out["tags"] = {f"tag{i}": v for i, v in enumerate(out["tags"].values())}
         return out
+
+    def num_id(self, real):
+        """Numeric v2 ids (book ids, highlight ids) mapped to stable synthetic
+        values. Not secret, but account-specific."""
+        if not isinstance(real, int):
+            return real
+        if real not in self.num_map:
+            self.num_map[real] = 10000001 + len(self.num_map)
+        return self.num_map[real]
+
+    def v2_book(self, book):
+        """Sanitize one per-book object from the POST /v2/highlights/ response."""
+        if not isinstance(book, dict):
+            return book
+        out = dict(book)
+        if "id" in out:
+            out["id"] = self.num_id(out["id"])
+        for field in TEXT_FIELDS:
+            if field in out:
+                out[field] = self.text(out[field])
+        for field in URL_FIELDS + ("cover_image_url", "highlights_url"):
+            if field in out:
+                out[field] = self.url(out[field])
+        if isinstance(out.get("modified_highlights"), list):
+            out["modified_highlights"] = [self.num_id(v) for v in out["modified_highlights"]]
+        return out
+
+    def v2_create_response(self, body):
+        if not isinstance(body, list):
+            return body
+        return [self.v2_book(b) for b in body]
 
     def id_url_response(self, body):
         """Sanitize the ``{"id": ..., "url": ...}`` body returned by save and
@@ -292,6 +324,29 @@ def main():
             s.id_url_response(body("07b_update_progress")),
         )
     )
+
+    # POST /v2/highlights/ create responses, from probe section 13. Answers are
+    # recorded as data, delete_then_list.json-style: the first create returns
+    # the target book with one modified highlight; the byte-identical re-POST
+    # returns the same book with modified_highlights EMPTY (server-side dedup,
+    # which is what makes the firmware's torn uploaded-flag patch harmless);
+    # a text-only create lands in a generic "Quotes" book.
+    if body("13b_create_highlight") is not None:
+        written.append(
+            write(
+                args.dst,
+                "highlights_create.json",
+                {
+                    "_comment": "HTTP 200 (not 201). Same book id in first and "
+                    "redundant create; dedup signalled by empty "
+                    "modified_highlights. The v3 Reader document list showed no "
+                    "new child document and an unchanged updated_at.",
+                    "first_create": s.v2_create_response(body("13b_create_highlight")),
+                    "redundant_create": s.v2_create_response(body("13c_redundant_create")),
+                    "text_only_create": s.v2_create_response(body("13d_create_text_only")),
+                },
+            )
+        )
 
     # --- refuse to emit anything that still looks sensitive ----------------
     problems = []

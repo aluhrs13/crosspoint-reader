@@ -5,6 +5,9 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <Memory.h>
+#include <ReadwiseHighlightStore.h>
+#include <SdReadwiseFileStore.h>
 #include <Serialization.h>
 #include <Utf8.h>
 
@@ -13,7 +16,9 @@
 #include "MappedInputManager.h"
 #include "ProgressFile.h"
 #include "ReaderUtils.h"
+#include "ReadwiseCredentialStore.h"
 #include "RecentBooksStore.h"
+#include "activities/readwise/ReadwiseSupport.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -58,13 +63,25 @@ void TxtReaderActivity::onExit() {
 
   pageOffsets.clear();
   currentPageLines.clear();
+  currentLineOffsets.clear();
+  docHighlights.clear();
   APP_STATE.readerActivityLoadCount = 0;
   APP_STATE.saveToFile();
   txt.reset();
 }
 
 void TxtReaderActivity::loop() {
+  if (highlightMode) {
+    handleHighlightModeInput();
+    return;
+  }
   if (managedDoc.managed) {
+    // Confirm is otherwise unused in this reader; on a Readwise document it
+    // opens sentence-selection mode for capturing a highlight.
+    if (!managedDocId.empty() && mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      enterHighlightMode();
+      return;
+    }
     // A managed document came from the Readwise library, so Back returns
     // there; the file-browser fallback would strand the user in the bodies
     // cache directory.
@@ -138,7 +155,27 @@ void TxtReaderActivity::initializeReader() {
   // Load saved progress
   loadProgress();
 
+  loadDocHighlights();
+
   initialized = true;
+}
+
+void TxtReaderActivity::loadDocHighlights() {
+  docHighlights.clear();
+  managedDocId.clear();
+  if (!managedDoc.managed) {
+    return;
+  }
+  managedDocId = ReadwiseUi::idFromBodyPath(txt->getPath());
+  if (managedDocId.empty()) {
+    return;
+  }
+  // Transient store objects; only the spans (<= 64 x 8 bytes) stay resident.
+  readwise::SdReadwiseFileStore fileStore;
+  readwise::ReadwiseHighlightStore highlightStore(fileStore, ReadwiseCredentialStore::getDataDir());
+  if (!highlightStore.loadSpans(managedDocId.c_str(), static_cast<uint32_t>(txt->getFileSize()), docHighlights)) {
+    LOG_ERR("TRS", "Could not load highlights for %s", managedDocId.c_str());
+  }
 }
 
 void TxtReaderActivity::buildPageIndex() {
@@ -180,8 +217,12 @@ void TxtReaderActivity::buildPageIndex() {
   LOG_DBG("TRS", "Built page index: %d pages", totalPages);
 }
 
-bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, size_t& nextOffset) {
+bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, size_t& nextOffset,
+                                         std::vector<size_t>* outLineOffsets) {
   outLines.clear();
+  if (outLineOffsets != nullptr) {
+    outLineOffsets->clear();
+  }
   const size_t fileSize = txt->getFileSize();
 
   if (offset >= fileSize) {
@@ -245,8 +286,13 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
     size_t lineBytePos = 0;
 
     // Emit at least one visual line for each source line (including blank lines),
-    // then continue with wrapping when needed.
+    // then continue with wrapping when needed. Each visual line's first byte
+    // sits at file offset `offset + pos + lineBytePos`, which is what makes
+    // highlight byte ranges mappable back onto rendered lines.
     do {
+      if (outLineOffsets != nullptr) {
+        outLineOffsets->push_back(offset + pos + lineBytePos);
+      }
       if (line.empty()) {
         outLines.emplace_back();
         break;
@@ -349,7 +395,8 @@ void TxtReaderActivity::render(RenderLock&&) {
   size_t offset = pageOffsets[currentPage];
   size_t nextOffset;
   currentPageLines.clear();
-  loadPageAtOffset(offset, currentPageLines, nextOffset);
+  loadPageAtOffset(offset, currentPageLines, nextOffset, &currentLineOffsets);
+  currentPageEnd = nextOffset;
 
   renderer.clearScreen();
   renderPage();
@@ -365,7 +412,8 @@ void TxtReaderActivity::renderPage() {
   // Render text lines with alignment
   auto renderLines = [&]() {
     int y = cachedOrientedMarginTop;
-    for (const auto& line : currentPageLines) {
+    for (size_t lineIndex = 0; lineIndex < currentPageLines.size(); ++lineIndex) {
+      const auto& line = currentPageLines[lineIndex];
       if (!line.empty()) {
         int x = cachedOrientedMarginLeft;
         const bool lineIsRtl = BidiUtils::startsWithRtl(line.c_str(), BidiUtils::RTL_PARAGRAPH_PROBE_DEPTH);
@@ -397,6 +445,12 @@ void TxtReaderActivity::renderPage() {
         }
 
         renderer.drawText(cachedFontId, x, y, line.c_str());
+        if (!lineIsRtl) {
+          drawHighlightUnderlines(lineIndex, x, y, lineHeight);
+          if (highlightMode) {
+            drawSelectionSegment(lineIndex, x, y, lineHeight);
+          }
+        }
       }
       y += lineHeight;
     }
@@ -410,6 +464,19 @@ void TxtReaderActivity::renderPage() {
 
   // BW rendering
   renderLines();
+
+  if (highlightMode) {
+    // Selection mode: hints instead of the status bar, always a fast refresh
+    // (cursor moves should not consume the full-refresh cycle), and no
+    // anti-aliased re-render -- it would repaint black text over the
+    // inverted selection.
+    const auto labels = mappedInput.mapDirectionalLabels(tr(STR_BACK), tr(STR_HIGHLIGHT), tr(STR_DIR_LEFT),
+                                                         tr(STR_DIR_RIGHT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    return;
+  }
+
   renderStatusBar();
 
   ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
@@ -418,6 +485,195 @@ void TxtReaderActivity::renderPage() {
     ReaderUtils::renderAntiAliased(renderer, [&renderLines]() { renderLines(); });
   }
   // scope destructor clears font cache via FontCacheManager
+}
+
+// --- highlight selection mode ----------------------------------------------
+
+void TxtReaderActivity::enterHighlightMode() {
+  if (pageOffsets.empty() || currentPage >= static_cast<int>(pageOffsets.size())) {
+    return;
+  }
+  const size_t pageStart = pageOffsets[currentPage];
+  if (currentPageEnd <= pageStart) {
+    return;
+  }
+  const size_t len = currentPageEnd - pageStart;
+
+  // Same transient chunk pattern as loadPageAtOffset; freed before returning.
+  auto buffer = makeUniqueNoThrow<char[]>(len + 1);
+  if (!buffer) {
+    LOG_ERR("TRS", "OOM: highlight chunk %zu bytes", len);
+    return;
+  }
+  if (!txt->readContent(reinterpret_cast<uint8_t*>(buffer.get()), pageStart, len)) {
+    return;
+  }
+  buffer[len] = '\0';
+
+  pageSentences.clear();
+  readwise::scanSentences(buffer.get(), len, static_cast<uint32_t>(pageStart), pageSentences, 128);
+  if (pageSentences.empty()) {
+    return;
+  }
+  highlightMode = true;
+  selAnchor = 0;
+  selCount = 1;
+  requestUpdate();
+}
+
+void TxtReaderActivity::exitHighlightMode() {
+  highlightMode = false;
+  pageSentences.clear();
+  pageSentences.shrink_to_fit();
+  requestUpdate();
+}
+
+void TxtReaderActivity::handleHighlightModeInput() {
+  const int sentenceCount = static_cast<int>(pageSentences.size());
+  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    exitHighlightMode();
+    return;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    commitHighlight();
+    return;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+    if (selAnchor > 0) {
+      selAnchor--;
+      selCount = 1;
+      requestUpdate();
+    }
+  } else if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+    if (selAnchor + 1 < sentenceCount) {
+      selAnchor++;
+      selCount = 1;
+      requestUpdate();
+    }
+  } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+    if (selAnchor + selCount < sentenceCount) {
+      selCount++;
+      requestUpdate();
+    }
+  } else if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+    if (selCount > 1) {
+      selCount--;
+      requestUpdate();
+    }
+  }
+}
+
+size_t TxtReaderActivity::selectionStart() const { return pageSentences[selAnchor].start; }
+
+size_t TxtReaderActivity::selectionEnd() const { return pageSentences[selAnchor + selCount - 1].end; }
+
+void TxtReaderActivity::commitHighlight() {
+  const size_t start = selectionStart();
+  size_t end = selectionEnd();
+  if (end <= start) {
+    exitHighlightMode();
+    return;
+  }
+  size_t textLen = end - start;
+  if (textLen > readwise::HIGHLIGHT_TEXT_CAP) {
+    // Clamp at a UTF-8 boundary; the record's endByte matches the stored text
+    // so the underline never claims more than what was captured.
+    textLen = readwise::HIGHLIGHT_TEXT_CAP;
+    end = start + textLen;
+  }
+
+  // ~1 KB record: heap, never stack.
+  auto rec = makeUniqueNoThrow<readwise::HighlightRecord>();
+  if (!rec) {
+    LOG_ERR("TRS", "OOM: highlight record");
+    exitHighlightMode();
+    return;
+  }
+  if (!txt->readContent(reinterpret_cast<uint8_t*>(rec->text), start, textLen)) {
+    exitHighlightMode();
+    return;
+  }
+  // Back off any trailing partial UTF-8 sequence the clamp may have split.
+  while (textLen > 0 && (static_cast<uint8_t>(rec->text[textLen - 1]) & 0xC0) == 0x80) {
+    textLen--;
+  }
+  if (textLen > 0 && static_cast<uint8_t>(rec->text[textLen - 1]) >= 0xC0) {
+    textLen--;
+  }
+  rec->text[textLen] = '\0';
+  rec->textLen = static_cast<uint16_t>(textLen);
+  rec->startByte = static_cast<uint32_t>(start);
+  rec->endByte = static_cast<uint32_t>(start + textLen);
+  rec->bodySize = static_cast<uint32_t>(txt->getFileSize());
+
+  readwise::SdReadwiseFileStore fileStore;
+  readwise::ReadwiseHighlightStore highlightStore(fileStore, ReadwiseCredentialStore::getDataDir());
+  const bool saved = textLen > 0 && highlightStore.append(managedDocId.c_str(), *rec);
+  if (saved) {
+    docHighlights.push_back({rec->startByte, rec->endByte});
+  }
+
+  GUI.drawPopup(renderer, saved ? tr(STR_HIGHLIGHT_SAVED) : tr(STR_HIGHLIGHT_FAILED));
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  vTaskDelay(pdMS_TO_TICKS(1200));
+
+  exitHighlightMode();
+}
+
+void TxtReaderActivity::drawSelectionSegment(size_t lineIndex, int lineX, int lineY, int lineHeight) {
+  if (lineIndex >= currentLineOffsets.size()) {
+    return;
+  }
+  const auto& line = currentPageLines[lineIndex];
+  const size_t lineStart = currentLineOffsets[lineIndex];
+  const size_t lineEnd = lineStart + line.size();
+  const size_t from = selectionStart() > lineStart ? selectionStart() : lineStart;
+  const size_t to = selectionEnd() < lineEnd ? selectionEnd() : lineEnd;
+  if (from >= to) {
+    return;
+  }
+  int x1 = lineX;
+  if (from > lineStart) {
+    x1 += renderer.getTextAdvanceX(cachedFontId, line.substr(0, from - lineStart).c_str(), EpdFontFamily::REGULAR);
+  }
+  const int x2 =
+      lineX + renderer.getTextAdvanceX(cachedFontId, line.substr(0, to - lineStart).c_str(), EpdFontFamily::REGULAR);
+  if (x2 <= x1) {
+    return;
+  }
+  // Inversion, the DictionaryWordSelectActivity pattern: black box, white text.
+  renderer.fillRect(x1, lineY - 1, x2 - x1, lineHeight + 2, true);
+  const std::string segment = line.substr(from - lineStart, to - from);
+  renderer.drawText(cachedFontId, x1, lineY, segment.c_str(), false);
+}
+
+void TxtReaderActivity::drawHighlightUnderlines(size_t lineIndex, int lineX, int lineY, int lineHeight) {
+  if (docHighlights.empty() || lineIndex >= currentLineOffsets.size()) {
+    return;
+  }
+  const auto& line = currentPageLines[lineIndex];
+  const size_t lineStart = currentLineOffsets[lineIndex];
+  const size_t lineEnd = lineStart + line.size();
+
+  for (const auto& span : docHighlights) {
+    const size_t from = span.start > lineStart ? span.start : lineStart;
+    const size_t to = span.end < lineEnd ? span.end : lineEnd;
+    if (from >= to) {
+      continue;
+    }
+    // Pixel positions of the intersection via prefix advances. Only lines that
+    // actually carry a highlight pay for these measurements, and the advance
+    // table is already primed by the page's wrap pass.
+    int x1 = lineX;
+    if (from > lineStart) {
+      x1 += renderer.getTextAdvanceX(cachedFontId, line.substr(0, from - lineStart).c_str(), EpdFontFamily::REGULAR);
+    }
+    const int x2 =
+        lineX + renderer.getTextAdvanceX(cachedFontId, line.substr(0, to - lineStart).c_str(), EpdFontFamily::REGULAR);
+    if (x2 > x1) {
+      renderer.drawLine(x1, lineY + lineHeight - 2, x2, lineY + lineHeight - 2, 2, true);
+    }
+  }
 }
 
 void TxtReaderActivity::renderStatusBar() const {

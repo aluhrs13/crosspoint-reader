@@ -19,6 +19,7 @@ class NullReadwiseApi : public ReadwiseApi {
   }
   ApiStatus pushOp(const PendingOp&) override { return ApiStatus::NetworkError; }
   ApiStatus fetchBody(const char*, BodySink&, uint16_t*) override { return ApiStatus::NetworkError; }
+  ApiStatus createHighlights(const HighlightPayload*, size_t, uint16_t*) override { return ApiStatus::NetworkError; }
 };
 
 }  // namespace readwise

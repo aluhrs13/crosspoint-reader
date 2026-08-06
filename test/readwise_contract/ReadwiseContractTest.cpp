@@ -103,7 +103,7 @@ const char* const kAllFixtures[] = {
     "list_normal.json", "list_optional_fields.json", "list_oversized_content.json",
     "list_page1.json",  "list_page2.json",           "list_unicode.json",
     "list_empty.json",  "delete_then_list.json",     "error_401.json",
-    "error_429.json",   "update_response.json",
+    "error_429.json",   "update_response.json",      "highlights_create.json",
 };
 
 // Collects the string/number value that followed a given key.
@@ -309,4 +309,35 @@ TEST(ReadwiseContract, RateLimitResponseCarriesRetryDelay) {
 TEST(ReadwiseContract, AuthFailureBodyIsParseable) {
   const std::vector<Event> events = parseChunked(loadFixture("error_401.json"), 64);
   EXPECT_EQ(valueAfterKey(events, "detail"), "Invalid token.");
+}
+
+// POST /api/v2/highlights/ contract, from probe section 13. The response is a
+// per-book array whose modified_highlights list carries the created ids; a
+// byte-identical re-POST answers with the SAME book and an EMPTY
+// modified_highlights — server-side dedup. That emptiness is load-bearing: the
+// firmware marks a record uploaded with a non-atomic one-byte patch, and a
+// torn patch re-sends the highlight on the next sync, which this behaviour
+// makes harmless.
+TEST(ReadwiseContract, HighlightCreateDedupsIdenticalRePost) {
+  const std::vector<Event> events = parseChunked(loadFixture("highlights_create.json"), 64);
+
+  // Fixture order: first_create, redundant_create, text_only_create.
+  ASSERT_EQ(countKey(events, "modified_highlights"), 3u);
+
+  std::vector<size_t> elementCounts;
+  for (size_t i = 0; i + 1 < events.size(); ++i) {
+    if (events[i].type != EventType::KEY || events[i].value != "modified_highlights") {
+      continue;
+    }
+    ASSERT_EQ(events[i + 1].type, EventType::ARRAY_START);
+    size_t count = 0;
+    for (size_t j = i + 2; j < events.size() && events[j].type != EventType::ARRAY_END; ++j) {
+      ++count;
+    }
+    elementCounts.push_back(count);
+  }
+  ASSERT_EQ(elementCounts.size(), 3u);
+  EXPECT_EQ(elementCounts[0], 1u) << "first create must report the created highlight id";
+  EXPECT_EQ(elementCounts[1], 0u) << "identical re-POST must dedup to an empty modified_highlights";
+  EXPECT_EQ(elementCounts[2], 1u) << "text-only create must still create a highlight";
 }

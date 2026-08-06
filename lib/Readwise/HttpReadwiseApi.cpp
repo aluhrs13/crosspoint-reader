@@ -163,6 +163,47 @@ ApiStatus HttpReadwiseApi::fetchBody(const char* id, BodySink& sink, uint16_t* r
   return runListRequest(url, discard, &sink, nullptr, retryAfterSeconds);
 }
 
+ApiStatus HttpReadwiseApi::createHighlights(const HighlightPayload* items, size_t count, uint16_t* retryAfterSeconds) {
+  if (retryAfterSeconds != nullptr) {
+    *retryAfterSeconds = 0;
+  }
+  if (token.empty()) {
+    return ApiStatus::NoCredentials;
+  }
+  if (insufficientHeap()) {
+    return ApiStatus::LowMemory;
+  }
+
+  // A 16-item batch of 1 KB highlights plus escaping overhead fits well inside
+  // 20 KB. Heap, transient for this call only; the caller already caps batch
+  // text at 8 KB.
+  constexpr size_t BODY_CAP = 20 * 1024;
+  auto body = makeUniqueNoThrow<char[]>(BODY_CAP);
+  if (!body) {
+    LOG_ERR("RWAPI", "OOM: highlights body");
+    return ApiStatus::LowMemory;
+  }
+  if (!buildHighlightsCreateBody(items, count, body.get(), BODY_CAP)) {
+    LOG_ERR("RWAPI", "Highlights body build failed (%u items)", (unsigned)count);
+    return ApiStatus::ServerError;
+  }
+
+  freeink::SecureHttpClient http;
+  if (!http.begin(HIGHLIGHTS_CREATE_URL)) {
+    return ApiStatus::NetworkError;
+  }
+  configureClient(http, token);
+  http.addHeader("Content-Type", "application/json");
+  const int status = http.sendRequest("POST", body.get());
+  if (status == 429 && retryAfterSeconds != nullptr) {
+    *retryAfterSeconds = retryAfterFrom(http);
+  }
+  http.end();
+
+  LOG_DBG("RWAPI", "POST highlights (%u items) -> %d", (unsigned)count, status);
+  return statusFromHttp(status);
+}
+
 ApiStatus HttpReadwiseApi::pushOp(const PendingOp& op) {
   if (token.empty()) {
     return ApiStatus::NoCredentials;

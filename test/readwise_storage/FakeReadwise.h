@@ -223,6 +223,45 @@ class FakeApi : public readwise::ReadwiseApi {
   }
 
   int pushAttempts = 0;
+
+  // --- createHighlights ----------------------------------------------------
+  struct CreatedHighlight {
+    std::string text;
+    std::string title;
+    std::string sourceUrl;
+  };
+  std::vector<std::vector<CreatedHighlight>> highlightBatches;
+  // Fails the Nth createHighlights call (1-based); 0 disables.
+  int failCreateHighlightsAt = 0;
+  readwise::ApiStatus createHighlightsFailStatus = readwise::ApiStatus::NetworkError;
+  // First N calls answer RateLimited with retry-after 16.
+  int highlightsRateLimitFirstN = 0;
+  int createHighlightsCalls = 0;
+
+  readwise::ApiStatus createHighlights(const readwise::HighlightPayload* items, size_t count,
+                                       uint16_t* retryAfterSeconds) override {
+    ++createHighlightsCalls;
+    if (retryAfterSeconds != nullptr) {
+      *retryAfterSeconds = 0;
+    }
+    if (highlightsRateLimitFirstN > 0) {
+      --highlightsRateLimitFirstN;
+      if (retryAfterSeconds != nullptr) {
+        *retryAfterSeconds = 16;
+      }
+      return readwise::ApiStatus::RateLimited;
+    }
+    if (failCreateHighlightsAt > 0 && createHighlightsCalls == failCreateHighlightsAt) {
+      return createHighlightsFailStatus;
+    }
+    std::vector<CreatedHighlight> batch;
+    for (size_t i = 0; i < count; ++i) {
+      batch.push_back({items[i].text != nullptr ? items[i].text : "", items[i].title != nullptr ? items[i].title : "",
+                       items[i].sourceUrl != nullptr ? items[i].sourceUrl : ""});
+    }
+    highlightBatches.push_back(std::move(batch));
+    return readwise::ApiStatus::Ok;
+  }
 };
 
 inline readwise::Document makeDoc(const char* id, readwise::Location location, const char* updatedAt,

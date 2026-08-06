@@ -129,6 +129,102 @@ bool buildUpdateBody(const PendingOp& op, char* out, size_t outCap) {
   return false;
 }
 
+namespace {
+
+// Appends `value` JSON-string-escaped (quotes, backslash, control characters
+// as \uXXXX shortforms where JSON defines them). UTF-8 passes through -- the
+// wire is UTF-8 JSON. Returns false on overflow.
+bool appendJsonEscaped(char* out, size_t outCap, size_t& pos, const char* value) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  for (const char* p = value; *p != '\0'; ++p) {
+    const uint8_t byte = static_cast<uint8_t>(*p);
+    const char* shortForm = nullptr;
+    switch (byte) {
+      case '"':
+        shortForm = "\\\"";
+        break;
+      case '\\':
+        shortForm = "\\\\";
+        break;
+      case '\n':
+        shortForm = "\\n";
+        break;
+      case '\r':
+        shortForm = "\\r";
+        break;
+      case '\t':
+        shortForm = "\\t";
+        break;
+      default:
+        break;
+    }
+    if (shortForm != nullptr) {
+      if (!appendLiteral(out, outCap, pos, shortForm)) {
+        return false;
+      }
+      continue;
+    }
+    if (byte < 0x20) {
+      char escaped[7] = {'\\', 'u', '0', '0', kHex[byte >> 4], kHex[byte & 0x0F], '\0'};
+      if (!appendLiteral(out, outCap, pos, escaped)) {
+        return false;
+      }
+      continue;
+    }
+    if (pos + 1 >= outCap) {
+      return false;
+    }
+    out[pos++] = *p;
+  }
+  return true;
+}
+
+bool appendJsonField(char* out, size_t outCap, size_t& pos, const char* name, const char* value, bool leadingComma) {
+  return (!leadingComma || appendLiteral(out, outCap, pos, ",")) && appendLiteral(out, outCap, pos, "\"") &&
+         appendLiteral(out, outCap, pos, name) && appendLiteral(out, outCap, pos, "\":\"") &&
+         appendJsonEscaped(out, outCap, pos, value) && appendLiteral(out, outCap, pos, "\"");
+}
+
+}  // namespace
+
+bool buildHighlightsCreateBody(const HighlightPayload* items, size_t count, char* out, size_t outCap) {
+  if (items == nullptr || count == 0 || out == nullptr) {
+    return false;
+  }
+  size_t pos = 0;
+  if (!appendLiteral(out, outCap, pos, "{\"highlights\":[")) {
+    return false;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    const HighlightPayload& item = items[i];
+    if (item.text == nullptr || item.text[0] == '\0') {
+      return false;
+    }
+    if (i > 0 && !appendLiteral(out, outCap, pos, ",")) {
+      return false;
+    }
+    if (!appendLiteral(out, outCap, pos, "{") || !appendJsonField(out, outCap, pos, "text", item.text, false)) {
+      return false;
+    }
+    if (item.title != nullptr && item.title[0] != '\0' &&
+        !appendJsonField(out, outCap, pos, "title", item.title, true)) {
+      return false;
+    }
+    if (item.sourceUrl != nullptr && item.sourceUrl[0] != '\0' &&
+        !appendJsonField(out, outCap, pos, "source_url", item.sourceUrl, true)) {
+      return false;
+    }
+    if (!appendLiteral(out, outCap, pos, ",\"source_type\":\"crosspoint\",\"category\":\"articles\"}")) {
+      return false;
+    }
+  }
+  if (!appendLiteral(out, outCap, pos, "]}")) {
+    return false;
+  }
+  out[pos] = '\0';
+  return true;
+}
+
 ApiStatus statusFromHttp(int httpStatus) {
   if (httpStatus < 0) {
     return ApiStatus::NetworkError;

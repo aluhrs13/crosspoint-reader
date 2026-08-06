@@ -219,6 +219,63 @@ DELETE /api/v3/delete/<document_id>/
 
 **Verified:** returns `204` with an empty body. Rate limit 20/minute *(documented-only)*. See [Deletion and tombstones](#deletion-and-tombstones) for what the server does not tell you afterwards.
 
+## Creating highlights (Highlights API v2)
+
+```http
+POST /api/v2/highlights/
+Content-Type: application/json
+
+{"highlights": [{"text": "...", "title": "...", "source_url": "...",
+                 "source_type": "crosspoint", "category": "articles"}, ...]}
+```
+
+Used by the on-device highlights feature (`lib/Readwise/ReadwiseHighlightSync`).
+This is the **older Highlights API**, not Reader v3, but it accepts the same
+token. The firmware batches up to 16 highlights per POST, omits `location` and
+`highlighted_at` (no reliable RTC; no meaningful location for extracted plain
+text), and sends `title`/`source_url` from the cached document. Rate limit
+240/minute *(documented-only)*.
+
+**Verified** (probe section 13, fixture `highlights_create.json`):
+
+* Success is **`200`**, not `201`, with a per-book array; each book object
+  carries `modified_highlights` with the created numeric highlight ids.
+* All five fields the firmware sends are accepted; `source_type` round-trips
+  verbatim as the book's `source`.
+* **Grouping:** the highlight lands in a Readwise "book" keyed by
+  `title`/`source_url` — the article's name and URL, so grouping is correct.
+  It does **not** appear as a Reader child document. Tested twice: once
+  against an empty throwaway, then against a throwaway saved **with html
+  content containing the exact highlight text**, matching `title` and
+  `source_url`, polled for **3 minutes** — no `category: highlight` child
+  document appeared, `parent_id` was never set, and the parent's `updated_at`
+  never moved. The position-matching sync Readwise documents is
+  extension↔Reader; there is no observable v2→Reader propagation at the API
+  level. (Whether Reader's *web UI* surfaces the Readwise-side highlight in a
+  matching document's Notebook tab was checked by hand: it does not.) The
+  Reader API v3 itself has no highlight-creation endpoint — v2 is the only
+  write path, the same one KOReader-style integrations use.
+* **The linkage is by internal id, not matchable fields.** A highlight made in
+  the Reader UI produced a v3 child document AND a v2 book with
+  `source: "reader"` and `location_type: "offset"` — a *different* book from
+  the API-created one despite an identical `source_url`. Re-posting a
+  highlight with Reader's exact signature (`source_type: "reader"`,
+  Reader's Title-Case title, offset location, same URL — the server accepts
+  `source_type: "reader"` verbatim) landed in yet another separate book and
+  never propagated into Reader. Uploads appearing inline in Reader is not
+  achievable by any third-party client; it would require a Readwise feature.
+* `location` may be omitted: the server assigns `location: 1,
+  location_type: "order"` automatically (verified by reading the created
+  highlight back via `GET /api/v2/highlights/<id>/`).
+* **Dedup:** a byte-identical re-POST answers with the same book and an
+  **empty** `modified_highlights` — no duplicate is created. This is what
+  makes the firmware's non-atomic uploaded-flag patch safe: a torn patch only
+  re-sends, never duplicates.
+* A text-only payload (no title/source_url) is accepted and lands in a generic
+  "Quotes" book with `category: "books"` — the fallback when a document has
+  been evicted from the local cache.
+* Cleanup path `DELETE /api/v2/highlights/<id>/` returns `204`.
+
 ## Rate limiting
 
 **Verified.** Exceeding a limit returns `429` with a JSON body and a `retry-after` header:

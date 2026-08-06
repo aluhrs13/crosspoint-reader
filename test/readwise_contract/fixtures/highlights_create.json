@@ -1,0 +1,70 @@
+{
+  "_comment": "HTTP 200 (not 201). Same book id in first and redundant create; dedup signalled by empty modified_highlights. The v3 Reader document list showed no new child document and an unchanged updated_at.",
+  "first_create": [
+    {
+      "id": 10000001,
+      "title": "Lorem ipsum dolor sit amet consectet",
+      "author": "Lorem ipsum",
+      "category": "articles",
+      "source": "Lorem ipsu",
+      "num_highlights": 1,
+      "last_highlight_at": "2026-08-06T03:01:16.823627Z",
+      "updated": "2026-08-06T03:01:16.839007Z",
+      "cover_image_url": "https://example.com/path-segment/path-segment/path-segment/path-segment/path-",
+      "highlights_url": "https://example.com/path-segment/path-s",
+      "source_url": "https://example.com/path-segment/path-segment/path",
+      "asin": null,
+      "tags": [],
+      "document_note": "",
+      "resurface_weighting": 1.0,
+      "source_syncs_all_books_together": false,
+      "modified_highlights": [
+        10000002
+      ]
+    }
+  ],
+  "redundant_create": [
+    {
+      "id": 10000001,
+      "title": "Lorem ipsum dolor sit amet consectet",
+      "author": "Lorem ipsum",
+      "category": "articles",
+      "source": "Lorem ipsu",
+      "num_highlights": 1,
+      "last_highlight_at": "2026-08-06T03:01:16.823627Z",
+      "updated": "2026-08-06T03:01:17.109064Z",
+      "cover_image_url": "https://example.com/path-segment/path-segment/path-segment/path-segment/path-",
+      "highlights_url": "https://example.com/path-segment/path-s",
+      "source_url": "https://example.com/path-segment/path-segment/path",
+      "asin": null,
+      "tags": [],
+      "document_note": "",
+      "resurface_weighting": 1.0,
+      "source_syncs_all_books_together": false,
+      "modified_highlights": []
+    }
+  ],
+  "text_only_create": [
+    {
+      "id": 10000003,
+      "title": "Lorem ",
+      "author": null,
+      "category": "books",
+      "source": "Lorem ip",
+      "num_highlights": 1,
+      "last_highlight_at": "2026-08-06T03:01:17.364591Z",
+      "updated": "2026-08-06T03:01:17.384626Z",
+      "cover_image_url": "https://example",
+      "highlights_url": "https://example.com/path-segment/path-s",
+      "source_url": null,
+      "asin": null,
+      "tags": [],
+      "document_note": "",
+      "resurface_weighting": 1.0,
+      "source_syncs_all_books_together": false,
+      "modified_highlights": [
+        10000004
+      ]
+    }
+  ]
+}

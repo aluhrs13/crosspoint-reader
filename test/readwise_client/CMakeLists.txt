@@ -1,5 +1,6 @@
 add_executable(ReadwiseClientTest
   ReadwiseClientTest.cpp
+  HighlightsBodyBuilderTest.cpp
   HtmlTextExtractorTest.cpp
   ReadwiseListParserTest.cpp
   ${REPO_ROOT}/lib/JsonParser/StreamingJsonParser.cpp

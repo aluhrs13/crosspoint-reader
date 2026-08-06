@@ -4,6 +4,8 @@
 #include <HttpReadwiseApi.h>
 #include <I18n.h>
 #include <Memory.h>
+#include <ReadwiseHighlightStore.h>
+#include <ReadwiseHighlightSync.h>
 #include <ReadwiseSyncEngine.h>
 #include <SdReadwiseFileStore.h>
 #include <WiFi.h>
@@ -83,6 +85,33 @@ void ReadwiseSyncActivity::performSync() {
   const readwise::SyncOutcome outcome = engine->sync();
 
   if (outcome.ok) {
+    // Push captured highlights before the body pass. A failure here must not
+    // fail the sync: records stay pending and the next sync retries, the same
+    // per-stage tolerance the body pass gets.
+    {
+      RenderLock lock(*this);
+      state = State::UPLOADING_HIGHLIGHTS;
+      pushed = outcome.pushed;
+      pulled = outcome.pulled;
+    }
+    requestUpdateAndWait();
+    {
+      readwise::ReadwiseHighlightStore highlightStore(store, ReadwiseCredentialStore::getDataDir());
+      readwise::ReadwiseHighlightSync highlightSync(api, *engine, highlightStore);
+      readwise::HighlightSyncHooks highlightHooks;
+      highlightHooks.sleepMs = [](void*, uint32_t ms) { delay(ms); };
+      const auto highlightOutcome = highlightSync.push(highlightHooks);
+      {
+        RenderLock lock(*this);
+        highlightsUploaded = highlightOutcome.uploaded;
+      }
+      if (!highlightOutcome.ok) {
+        LOG_ERR("RWSYNC", "Highlight push incomplete: %u uploaded, %u failed, status=%s",
+                (unsigned)highlightOutcome.uploaded, (unsigned)highlightOutcome.failed,
+                readwise::apiStatusName(highlightOutcome.status));
+      }
+    }
+
     // Sync is the only online operation: fetch every missing article body now
     // so the whole library reads offline afterwards. Throttling is expected --
     // body fetches share the list endpoint's 20 req/min budget -- and the
@@ -90,8 +119,6 @@ void ReadwiseSyncActivity::performSync() {
     {
       RenderLock lock(*this);
       state = State::DOWNLOADING_BODIES;
-      pushed = outcome.pushed;
-      pulled = outcome.pulled;
     }
     requestUpdateAndWait();
 
@@ -165,6 +192,9 @@ void ReadwiseSyncActivity::render(RenderLock&&) {
     case State::SYNCING:
       GUI.drawPopup(renderer, tr(STR_READWISE_SYNCING));
       break;
+    case State::UPLOADING_HIGHLIGHTS:
+      GUI.drawPopup(renderer, tr(STR_READWISE_UPLOADING_HIGHLIGHTS));
+      break;
     case State::DOWNLOADING_BODIES: {
       // drawPopup does not wrap, so keep this short: "Downloading article... 3/12".
       char progress[64];
@@ -174,10 +204,14 @@ void ReadwiseSyncActivity::render(RenderLock&&) {
       break;
     }
     case State::COMPLETE: {
-      char summary[64];
+      char summary[80];
+      // "^N" is the uploaded-highlights count, shown only when any went up.
       if (bodiesFailed > 0) {
         snprintf(summary, sizeof(summary), "%s (%u/%u, -%u)", tr(STR_READWISE_SYNC_COMPLETE), (unsigned)bodiesDone,
                  (unsigned)bodiesTotal, (unsigned)bodiesFailed);
+      } else if (highlightsUploaded > 0) {
+        snprintf(summary, sizeof(summary), "%s (%u/%u, ^%u)", tr(STR_READWISE_SYNC_COMPLETE), (unsigned)bodiesDone,
+                 (unsigned)bodiesTotal, (unsigned)highlightsUploaded);
       } else {
         snprintf(summary, sizeof(summary), "%s (%u/%u)", tr(STR_READWISE_SYNC_COMPLETE), (unsigned)bodiesDone,
                  (unsigned)bodiesTotal);

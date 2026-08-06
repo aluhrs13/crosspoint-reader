@@ -78,6 +78,14 @@ class BodySink {
   virtual bool onBodyEnd(bool complete) = 0;
 };
 
+// One highlight for POST /api/v2/highlights/. Pointers must outlive the call;
+// title/sourceUrl may be empty (omitted from the payload), text must not be.
+struct HighlightPayload {
+  const char* text = "";
+  const char* title = "";
+  const char* sourceUrl = "";
+};
+
 class ReadwiseApi {
  public:
   virtual ~ReadwiseApi() = default;
@@ -99,6 +107,11 @@ class ReadwiseApi {
   // on-demand as the retry path when a document is opened. `retryAfterSeconds`
   // is set on RateLimited.
   virtual ApiStatus fetchBody(const char* id, BodySink& sink, uint16_t* retryAfterSeconds) = 0;
+
+  // Creates a batch of highlights via the Highlights API v2 -- a different API
+  // from the Reader v3 endpoints above, but the same token. `retryAfterSeconds`
+  // is set on RateLimited.
+  virtual ApiStatus createHighlights(const HighlightPayload* items, size_t count, uint16_t* retryAfterSeconds) = 0;
 };
 
 }  // namespace readwise

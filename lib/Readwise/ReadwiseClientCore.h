@@ -16,6 +16,8 @@ namespace readwise {
 
 inline constexpr const char* API_BASE = "https://readwise.io/api/v3";
 inline constexpr const char* AUTH_CHECK_URL = "https://readwise.io/api/v2/auth/";
+// Highlight creation lives on the older Highlights API, not Reader v3.
+inline constexpr const char* HIGHLIGHTS_CREATE_URL = "https://readwise.io/api/v2/highlights/";
 
 // Builds the /list/ URL for a page query. Percent-encodes parameter values --
 // updatedAfter carries '+' and ':' from ISO 8601, and an unencoded '+' decodes
@@ -33,6 +35,14 @@ bool buildUpdateUrl(const char* id, char* out, size_t outCap);
 // Returns false for an op that must never be pushed (unknown type, or a
 // location value outside the writable set).
 bool buildUpdateBody(const PendingOp& op, char* out, size_t outCap);
+
+// The POST body for /api/v2/highlights/: {"highlights":[{...},...]}. Text and
+// title are JSON-escaped; empty title/source_url are omitted. Returns false on
+// overflow, a null/empty text, or count == 0 -- never a truncated body.
+// Field set pinned by probe 13b: text, title, source_url, source_type,
+// category; location and highlighted_at are deliberately omitted (no reliable
+// RTC, no meaningful location for extracted plain text).
+bool buildHighlightsCreateBody(const HighlightPayload* items, size_t count, char* out, size_t outCap);
 
 // Maps an HTTP status (or a negative transport failure) to ApiStatus.
 ApiStatus statusFromHttp(int httpStatus);

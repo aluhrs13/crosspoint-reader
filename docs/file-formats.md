@@ -545,3 +545,55 @@ truncated one is discarded and refetched.
 Bodies are fetched when a document is opened rather than prefetched, and are
 deleted when the document moves to `archive` or `feed` or disappears from a
 completed reconciliation sweep.
+
+### `highlights/<docid>.bin` — Version 1
+
+Highlights captured on-device for one Readwise document, encoded by
+`lib/Readwise/ReadwiseHighlights.cpp`. Variable-length records are appended
+one at a time; each starts with a `u16 payloadLen` counting everything after
+itself, so a loader can skip records without decoding them and a trailing
+partial record (payloadLen running past EOF) is discarded — the journal's
+torn-append discipline applied to variable-width records. Appends rewrite the
+file through the temp+rename path, so a crash mid-append leaves the previous
+file untouched.
+
+`startByte`/`endByte` anchor the highlight as a byte range into
+`bodies/<docid>.txt`; `bodySize` is that file's size at capture time, and
+rendering skips records whose `bodySize` no longer matches (a re-downloaded
+body shifts offsets). The text snapshot keeps the upload valid regardless.
+
+`flags` sits at fixed offset 2 within each record so marking a record uploaded
+(bit 0) is a single-byte in-place patch, the `FLAG_HAS_BODY` pattern; a torn
+patch costs at worst one redundant re-upload. Uploaded records are kept so
+their underlines persist. At most 64 records per document; text is capped at
+1024 bytes, clamped at a UTF-8 boundary.
+
+ImHex pattern:
+
+```c++
+struct HighlightRecord {
+    u16 payloadLen;
+    u8  flags;       // bit0 uploaded
+    u32 startByte;   // range into bodies/<docid>.txt
+    u32 endByte;
+    u32 bodySize;    // body size at capture; render-guard
+    u16 textLen;     // == payloadLen - 15
+    char text[textLen];
+};
+
+struct HighlightsBin {
+    u8 version;      // 1
+    HighlightRecord records[while(!std::mem::eof())];
+};
+
+HighlightsBin file @ 0x00;
+```
+
+### `highlights/pending.bin` — Version 1
+
+The upload work list: ids of documents with un-uploaded highlights, so the
+sync pass never enumerates the highlights directory. `u8 version` followed by
+fixed-width NUL-padded `char docId[27]` entries; a torn append leaves a
+partial tail that integer division excludes on load. Appended (deduplicated)
+when a highlight is captured, rewritten atomically when a document's
+highlights finish uploading.

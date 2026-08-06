@@ -347,6 +347,118 @@ def run(probe, include_rate_limit):
             note="does time-slicing a capped set yield exact counts",
         )
 
+    # --- 13. Highlights API v2 create (for the on-device highlights feature) -
+    # Everything here targets a fresh throwaway Reader document and the
+    # highlights created against it; both are deleted again at the end. The
+    # questions, in order: which fields does POST /v2/highlights/ accept and
+    # what does success look like; does a highlight whose title/source_url
+    # match an existing Reader document ATTACH to it (visible as a child
+    # document with parent_id in the v3 list) or create a standalone book;
+    # does re-POSTing identical text+title dedup; and is the minimal
+    # text-only payload accepted.
+    before_highlights = iso_now(-5)
+    hl_url = f"{THROWAWAY_URL_BASE}-hl-{int(time.time())}"
+    hl_doc = probe.request(
+        "13a_save_highlight_throwaway",
+        "POST",
+        f"{BASE_V3}/save/",
+        body={"url": hl_url, "title": "CrossPoint highlight probe throwaway"},
+        note="disposable document for the highlight probes",
+    )
+    hl_doc_id = hl_doc["body"].get("id") if isinstance(hl_doc["body"], dict) else None
+    if not hl_doc_id or hl_doc["status"] != 201:
+        print(
+            "[13] skipped: could not create a fresh throwaway document for the "
+            "highlight probes",
+            file=sys.stderr,
+        )
+    else:
+        time.sleep(2)
+        hl_payload = {
+            "highlights": [
+                {
+                    "text": "A probe sentence captured by CrossPoint.",
+                    "title": "CrossPoint highlight probe throwaway",
+                    "source_url": hl_url,
+                    "source_type": "crosspoint",
+                    "category": "articles",
+                    # location and highlighted_at deliberately omitted: the
+                    # device has no reliable RTC and no meaningful location,
+                    # so the firmware will omit them too.
+                }
+            ]
+        }
+        created_hl = probe.request(
+            "13b_create_highlight",
+            "POST",
+            f"{BASE_V2}/highlights/",
+            body=hl_payload,
+            note="field set the firmware intends to send; success-response shape "
+            "and rate-limit header casing",
+        )
+        probe.request(
+            "13c_redundant_create",
+            "POST",
+            f"{BASE_V2}/highlights/",
+            body=hl_payload,
+            note="identical re-POST: dedup question -- a torn uploaded-flag on "
+            "device would re-send, is that harmless?",
+        )
+        probe.request(
+            "13d_create_text_only",
+            "POST",
+            f"{BASE_V2}/highlights/",
+            body={"highlights": [{"text": "CrossPoint minimal probe highlight."}]},
+            note="minimal accepted payload, for documents missing local metadata",
+        )
+        time.sleep(2)
+        probe.request(
+            "13e_list_after_highlight",
+            "GET",
+            list_url(updatedAfter=before_highlights, withFullContent="false"),
+            note="THE attach question: did the highlight land as a child of the "
+            "throwaway (parent_id set) or as a standalone book?",
+        )
+        # Clean up every highlight the three creates produced. The v2 create
+        # response carries modified_highlights ids on current API versions;
+        # collect defensively from both creates.
+        hl_ids = []
+        for record in (created_hl,):
+            body = record["body"] if isinstance(record["body"], dict) else {}
+            for key in ("modified_highlights", "highlights"):
+                value = body.get(key)
+                if isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, int):
+                            hl_ids.append(item)
+                        elif isinstance(item, dict) and isinstance(item.get("id"), int):
+                            hl_ids.append(item["id"])
+        if not hl_ids and isinstance(created_hl["body"], list):
+            for item in created_hl["body"]:
+                if isinstance(item, dict):
+                    for sub in item.get("modified_highlights", []) or []:
+                        if isinstance(sub, int):
+                            hl_ids.append(sub)
+        for hl_id in hl_ids:
+            probe.request(
+                f"13f_delete_highlight_{hl_id}",
+                "DELETE",
+                f"{BASE_V2}/highlights/{hl_id}/",
+                note="cleanup of a probe-created highlight",
+            )
+        if not hl_ids:
+            print(
+                "[13f] no highlight ids recognized in the create response; "
+                "clean up probe highlights manually in Readwise",
+                file=sys.stderr,
+            )
+        probe.request(
+            "13g_delete_highlight_throwaway",
+            "DELETE",
+            f"{BASE_V3}/delete/{hl_doc_id}/",
+            note="cleanup of the highlight-probe throwaway document",
+        )
+
     # --- 11. Rate limiting (opt-in; leaves LIST throttled for ~a minute) ---
     if not include_rate_limit:
         print(
