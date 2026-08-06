@@ -28,7 +28,9 @@ namespace readwise {
 // views are Later, Shortlist and Feed.
 struct LocationPolicy {
   Location location;
-  bool unreadOnly;      // skip FLAG_SEEN docs during pull; drop seen records at sync merge
+  // Skip FLAG_SEEN docs during the pull (they are tombstoned instead, so a copy
+  // cached while unread is dropped) and drop seen records at the sync merge.
+  bool unreadOnly;
   bool reconcileSweep;  // participates in the deletion sweep
   uint8_t maxPages;     // pagination bound for this location
 };
@@ -174,10 +176,17 @@ class ReadwiseSyncEngine {
   // A document staged during the pull, held only as an id plus its offset in the
   // staging file. 100 documents costs ~3 KB, which is affordable; the records
   // themselves stay on disk.
+  //
+  // `length == 0` is a tombstone: the id was seen in the pull but deliberately
+  // not written to staging, because the sync policy expires it (a read document
+  // in an unread-only location). It supersedes any cached copy exactly like a
+  // real record does, which is what removes an item read on another device.
   struct StagedRef {
     char id[ID_CAP];
     uint32_t offset;
     uint32_t length;
+
+    bool isTombstone() const { return length == 0; }
   };
 
   // What the index rebuild needs, gathered while docs.bin is written so the file

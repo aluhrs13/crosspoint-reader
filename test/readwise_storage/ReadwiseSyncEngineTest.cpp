@@ -601,6 +601,37 @@ TEST(ReadwiseSync, SeenFeedDocIsRemovedOnNextSync) {
   EXPECT_FALSE(f.store.has(body)) << "the body goes with the record";
 }
 
+// The same cleanup must happen when the read happened somewhere else: the item
+// is cached unread, another client marks it read, and the next pull is the only
+// place that learns of it. The pull does not stage read feed items, so without a
+// tombstone the stale unread record would survive carry-over forever.
+TEST(ReadwiseSync, FeedDocReadOnAnotherDeviceIsRemovedOnNextSync) {
+  Fixture f;
+  pushEmptyPagesForNonFeed(f);
+  f.api.pages.push_back(
+      {{makeDoc("f1", Location::Feed, kT1, kT1), makeDoc("f2", Location::Feed, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  EXPECT_EQ(f.engine.indexCount(Location::Feed), 2u);
+
+  const std::string body = f.engine.bodyPath("f1");
+  f.store.put(body, {'t', 'e', 'x', 't'});
+  ASSERT_TRUE(f.engine.setBodyCached("f1", true));
+
+  // f1 comes back read, with a newer updated_at -- exactly what the API returns
+  // after another client opens it.
+  pushEmptyPagesForNonFeed(f);
+  f.api.pages.push_back({{makeSeenDoc("f1", Location::Feed, kT2, kT1)}, "", ApiStatus::Ok});
+  const SyncOutcome outcome = f.engine.sync();
+  ASSERT_TRUE(outcome.ok) << "failed at stage " << static_cast<int>(outcome.failedStage);
+  EXPECT_EQ(outcome.pulled, 0) << "a tombstone is not a pulled document";
+
+  Document doc;
+  EXPECT_FALSE(f.engine.findDocument("f1", doc)) << "an item read elsewhere must leave docs.bin";
+  EXPECT_FALSE(f.store.has(body)) << "the body goes with the record";
+  EXPECT_EQ(f.engine.indexCount(Location::Feed), 1u);
+  EXPECT_TRUE(f.engine.findDocument("f2", doc)) << "the untouched item must survive";
+}
+
 // The removal is deliberately deferred to the next sync: rebuildLocal runs on
 // every library entry, and the article the user just read must stay openable.
 TEST(ReadwiseSync, RebuildLocalDoesNotRemoveSeenFeedDoc) {
