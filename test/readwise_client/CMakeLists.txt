@@ -1,6 +1,7 @@
 add_executable(ReadwiseClientTest
   ReadwiseClientTest.cpp
   HtmlTextExtractorTest.cpp
+  HtmlTokenizerTest.cpp
   ReadwiseListParserTest.cpp
   ${REPO_ROOT}/lib/JsonParser/StreamingJsonParser.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseDocument.cpp
@@ -8,6 +9,7 @@ add_executable(ReadwiseClientTest
   ${REPO_ROOT}/lib/Readwise/ReadwiseListParser.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseClientCore.cpp
   ${REPO_ROOT}/lib/Readwise/HtmlTextExtractor.cpp
+  ${REPO_ROOT}/lib/Readwise/HtmlTokenizer.cpp
   ${REPO_ROOT}/lib/Readwise/BodyTextWriter.cpp
 )
 

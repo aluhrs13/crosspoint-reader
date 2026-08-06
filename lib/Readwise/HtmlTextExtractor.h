@@ -3,11 +3,13 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "HtmlTokenizer.h"
+
 // Streaming HTML-to-plain-text converter for Readwise article bodies.
 //
-// Input arrives in arbitrary chunks -- including splits inside a tag, an
-// entity, or a multi-byte UTF-8 sequence -- and normalized text leaves through
-// a caller-supplied sink as it is produced. Neither the HTML nor the text ever
+// Tokenizing is HtmlTokenizer's job; this is only the flattening policy on top
+// of it. Input arrives in arbitrary chunks and normalized text leaves through a
+// caller-supplied sink as it is produced. Neither the HTML nor the text ever
 // exists whole in memory: total state is a few fixed buffers, because a real
 // article body is ~88 KB against a ~380 KB RAM ceiling.
 //
@@ -23,7 +25,7 @@
 
 namespace readwise {
 
-class HtmlTextExtractor {
+class HtmlTextExtractor : private HtmlTokenHandler {
  public:
   // Return false to abort; feed() then returns false and further input is
   // ignored until reset().
@@ -37,51 +39,20 @@ class HtmlTextExtractor {
   bool finish();
 
  private:
-  enum class State : uint8_t {
-    TEXT,
-    TAG_OPEN,     // just saw '<'
-    TAG_NAME,     // collecting the element name
-    TAG_REST,     // inside the tag, waiting for '>'
-    TAG_QUOTE,    // inside a quoted attribute value
-    ENTITY,       // collecting an &...; reference
-    MARKUP_OPEN,  // saw "<!", deciding comment vs declaration
-    COMMENT,      // inside <!-- ... -->, ends only at "-->"
-    DECLARATION,  // <!doctype ...> or <?...>, ends at the first '>'
+  bool onText(const char* data, size_t len, bool literal) override;
+  bool onStartTag(const char* name, size_t len, const HtmlAttrCapture* attrs, bool selfClosing) override;
+  bool onEndTag(const char* name, size_t len) override;
 
-    RAWTEXT,        // inside script/style/template content
-    RAWTEXT_MAYBE,  // saw '<' inside rawtext, matching against "</name"
-  };
-
-  bool consume(char c);
-  bool handleTagComplete();
-  bool decodeEntity();
+  bool handleTag(const char* name, size_t len, bool closing);
   bool put(char c);
-  bool putUtf8(uint32_t codepoint);
   bool flushOutput();
   bool emitPendingBreaks();
 
-  static constexpr size_t TAG_NAME_CAP = 12;
-  static constexpr size_t ENTITY_CAP = 12;
   static constexpr size_t OUT_CAP = 256;
 
   TextSink sink_;
   void* ctx_;
-
-  State state_ = State::TEXT;
-  char tagName_[TAG_NAME_CAP];
-  size_t tagNameLen_ = 0;
-  bool closingTag_ = false;
-  char quoteChar_ = 0;
-  char entity_[ENTITY_CAP];
-  size_t entityLen_ = 0;
-
-  // Rawtext bookkeeping: the element whose closing tag ends the raw span, and
-  // the match progress while checking a candidate "</name".
-  char rawTag_[TAG_NAME_CAP];
-  size_t rawTagLen_ = 0;
-  size_t rawMatchPos_ = 0;
-  // Comment end matching: counts trailing '-' seen.
-  uint8_t commentDashes_ = 0;
+  HtmlTokenizer tokenizer_;
 
   // Whitespace/break normalization.
   uint8_t pendingNewlines_ = 0;

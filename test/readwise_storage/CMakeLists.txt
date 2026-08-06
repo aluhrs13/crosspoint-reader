@@ -9,6 +9,7 @@ add_executable(ReadwiseStorageTest
   ${REPO_ROOT}/lib/Readwise/ReadwiseSyncEngine.cpp
   ${REPO_ROOT}/lib/Readwise/BodyTextWriter.cpp
   ${REPO_ROOT}/lib/Readwise/HtmlTextExtractor.cpp
+  ${REPO_ROOT}/lib/Readwise/HtmlTokenizer.cpp
   ${REPO_ROOT}/lib/Readwise/ZipWriter.cpp
 )
 
