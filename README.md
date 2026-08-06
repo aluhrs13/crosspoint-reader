@@ -52,7 +52,8 @@ an article; hold **Confirm** for one second to queue it for archiving. Run
   Readwise or provide two-way cross-device progress sync.
 - The Readwise **New** view is not synchronized. Feed sync retains unread items
   only.
-- The token is device-obfuscated on the SD card, not encrypted.
+- The token is XOR-obfuscated with a device-specific value and base64-encoded on
+  the SD card, not encrypted; physical access to the card can expose it.
 - As with the existing CrossPoint network clients, Readwise HTTPS currently
   uses an unverified TLS connection. Use trusted networks and revoke the token
   from Readwise if the device or SD card is lost.
