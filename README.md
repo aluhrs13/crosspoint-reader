@@ -1,3 +1,67 @@
+> [!IMPORTANT]
+> **This is the `aluhrs13/crosspoint-reader` fork.** It tracks the upstream
+> [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)
+> project while adding Readwise Reader integration. Install firmware from this
+> fork—not an upstream release—if you want the Readwise features described below.
+
+## What this fork adds
+
+This fork adds an explicit, local-first sync client for
+[Readwise Reader](https://readwise.io/read). It does not run Wi-Fi or sync in the
+background.
+
+- Browse **Later**, **Shortlist**, and unread **Feed** documents from the device.
+- Download article text during sync and cache it on the SD card for offline
+  reading.
+- Mark an article as seen when it is opened.
+- Archive an article with a long press and send that change to Readwise on the
+  next sync.
+- Limit the local library to 25, 50, 100, or 200 documents (100 by default).
+
+### Install and set up Readwise
+
+1. Download `firmware.bin` from
+   [this fork's Releases page](https://github.com/aluhrs13/crosspoint-reader/releases).
+2. Flash it with the upstream web installer: open
+   [CrossPoint Flash Tools](https://crosspointreader.com/#flash-tools), select
+   your device, choose **Custom .bin**, and upload the downloaded file.
+3. Get your Readwise access token from
+   [readwise.io/access_token](https://readwise.io/access_token).
+4. Configure the token using either method:
+   - **On the device:** open **Settings > System > Readwise**, enter the token,
+     run **Test Connection**, turn on **Show in Home Menu**, and optionally
+     choose a **Document Limit**.
+   - **From a browser (easier for the long token):** open **File Transfer** on
+     the device, join a trusted Wi-Fi network or create a hotspot, open the URL
+     shown on the screen, then use the **Readwise** card on the **Settings**
+     page to enter the token and enable **Show in Home Menu**. Save the settings,
+     then return to the device to test the connection if desired.
+5. Open **Readwise** from the Home screen, select **Sync now**, and connect to
+   Wi-Fi when prompted. The initial sync downloads article bodies and can take
+   several minutes because Readwise rate-limits API requests.
+
+After syncing, downloaded articles can be opened without Wi-Fi. Use **Left** and
+**Right** to switch between Later, Shortlist, and Feed; press **Confirm** to open
+an article; hold **Confirm** for one second to queue it for archiving. Run
+**Sync now** again to send queued changes and fetch updates.
+
+### Current limitations and security notes
+
+- Reading position only syncs **from** Readwise. The Reader API accepts but
+  discards progress updates, so this device cannot update your position in
+  Readwise or provide two-way cross-device progress sync.
+- The Readwise **New** view is not synchronized. Feed sync retains unread items
+  only.
+- The token is device-obfuscated on the SD card, not encrypted.
+- As with the existing CrossPoint network clients, Readwise HTTPS currently
+  uses an unverified TLS connection. Use trusted networks and revoke the token
+  from Readwise if the device or SD card is lost.
+
+Implementation details and the measured API behavior are documented in
+[the Readwise API contract](docs/readwise-api-contract.md).
+
+---
+
 # CrossPoint Reader
 
 [![Fund contributors](https://img.shields.io/badge/%F0%9F%91%91_Fund_contributors-royalty.dev-BB953A?style=for-the-badge&labelColor=1a1a1a)](https://app.royalty.dev/crosspoint-reader/crosspoint-reader)
