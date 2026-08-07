@@ -26,7 +26,9 @@
 namespace {
 // Confirm held this long queues an archive instead of opening. Matches the
 // reader's GO_HOME_MS long-press feel.
-constexpr unsigned long ARCHIVE_HOLD_MS = 1000;
+// Shared by every press-and-hold action on this screen: archive (Confirm) and
+// send-to-location (Left/Right).
+constexpr unsigned long HOLD_ACTION_MS = 1000;
 // One window of metadata; sized generously past a visible page.
 constexpr int WINDOW_SIZE = 32;
 
@@ -211,30 +213,44 @@ void ReadwiseLibraryActivity::loop() {
   // Checking held time on release instead looked equivalent but never
   // triggered in the hand.
   if (mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
-    if (!archiveTriggered && selectedIndex > 0 && mappedInput.getHeldTime() >= ARCHIVE_HOLD_MS) {
+    if (!holdActionTriggered && selectedIndex > 0 && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
       const readwise::Document* doc = docAt(selectedIndex - 1);
       if (doc != nullptr) {
-        archiveTriggered = true;  // suppress the release below
-        queueArchive(*doc);
+        holdActionTriggered = true;  // suppress the release below
+        queueMove(*doc, readwise::Location::Archive);
       }
     }
     return;
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (archiveTriggered) {
-      archiveTriggered = false;  // the hold already acted
+    if (holdActionTriggered) {
+      holdActionTriggered = false;  // the hold already acted
       return;
     }
     activateSelection();
     return;
   }
 
+  if (handleLocationHold(MappedInputManager::Button::Left, leftTargetIndex())) {
+    return;
+  }
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+    if (holdActionTriggered) {
+      holdActionTriggered = false;  // the hold already moved the article
+      return;
+    }
     jumpToLocation(leftTargetIndex());
     return;
   }
+  if (handleLocationHold(MappedInputManager::Button::Right, rightTargetIndex())) {
+    return;
+  }
   if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+    if (holdActionTriggered) {
+      holdActionTriggered = false;
+      return;
+    }
     jumpToLocation(rightTargetIndex());
     return;
   }
@@ -436,14 +452,32 @@ void ReadwiseLibraryActivity::performDownload() {
   requestUpdate();
 }
 
-void ReadwiseLibraryActivity::queueArchive(const readwise::Document& doc) {
+bool ReadwiseLibraryActivity::handleLocationHold(const MappedInputManager::Button button, const int targetIndex) {
+  if (!mappedInput.isPressed(button)) {
+    return false;
+  }
+  const readwise::Location target = LOCATIONS[targetIndex];
+  // Feed is server-side content rather than a shelf, so it is a view you can
+  // switch to but never a destination you can send an article to.
+  const bool movable = target == readwise::Location::Later || target == readwise::Location::Shortlist;
+  if (movable && !holdActionTriggered && selectedIndex > 0 && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
+    const readwise::Document* doc = docAt(selectedIndex - 1);
+    if (doc != nullptr) {
+      holdActionTriggered = true;  // suppress the release that follows
+      queueMove(*doc, target);
+    }
+  }
+  return true;  // held: swallow the frame either way
+}
+
+void ReadwiseLibraryActivity::queueMove(const readwise::Document& doc, const readwise::Location target) {
   if (engine == nullptr) {
     return;
   }
-  if (!engine->queueLocationChange(doc.id, readwise::Location::Archive, doc.updatedAt)) {
+  if (!engine->queueLocationChange(doc.id, target, doc.updatedAt)) {
     return;
   }
-  // Visible immediately: the document leaves the synced indexes now, and the
+  // Visible immediately: the document leaves the current index now, and the
   // queued op pushes at the next sync.
   engine->rebuildLocal();
   reloadCounts();

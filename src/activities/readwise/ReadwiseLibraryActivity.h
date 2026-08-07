@@ -55,7 +55,11 @@ class ReadwiseLibraryActivity final : public Activity {
   void performDownload();
   void migrateLegacyTextBodies();
   static void sImageProgress(void* ctx, size_t done, size_t total);
-  void queueArchive(const readwise::Document& doc);
+  void queueMove(const readwise::Document& doc, readwise::Location target);
+  // Long-pressing a location button sends the selected article there instead
+  // of switching to that view. Returns true while the button is held, so the
+  // caller swallows the frame.
+  bool handleLocationHold(MappedInputManager::Button button, int targetIndex);
   void jumpToLocation(int index);
   // Persists locationIndex so Back out of an article returns to this view.
   void rememberLocation();
@@ -96,9 +100,9 @@ class ReadwiseLibraryActivity final : public Activity {
   std::string pendingDownloadAuthor;
   bool pendingDownloadSeen = false;
   std::string statusMessage;
-  // Set when a hold has already archived, so the following Confirm release
-  // does not also open the document.
-  bool archiveTriggered = false;
+  // Set when a hold has already acted (archive, or a move to another view), so
+  // the release that follows does not also open the document or switch views.
+  bool holdActionTriggered = false;
   bool wifiActivated = false;
   // Back is also what navigates *into* this screen (from Settings, or out of a
   // managed article), and the button is often still held when the activity is
