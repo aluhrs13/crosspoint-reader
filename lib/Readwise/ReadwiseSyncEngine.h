@@ -49,6 +49,7 @@ inline constexpr LocationPolicy SYNCED_LOCATIONS[] = {
 
 constexpr const LocationPolicy* policyFor(Location location) {
   for (const LocationPolicy& policy : SYNCED_LOCATIONS) {
+    // cppcheck-suppress useStlAlgorithm  // constexpr lookup over a 3-entry table; find_if buys nothing here
     if (policy.location == location) {
       return &policy;
     }
