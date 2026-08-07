@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iterator>
 
 #include "CrossPointState.h"
 #include "ReadwiseCredentialStore.h"
@@ -90,6 +91,11 @@ void ReadwiseLibraryActivity::onEnter() {
     engine->rebuildLocal();
   }
   migrateLegacyTextBodies();
+  // Return to the view the last article was opened from rather than always
+  // Later -- including after the restart that an uncached open performs.
+  constexpr auto locationCount = static_cast<uint8_t>(std::size(LOCATIONS));
+  locationIndex =
+      APP_STATE.readwiseLocationIndex < locationCount ? static_cast<int>(APP_STATE.readwiseLocationIndex) : 0;
   selectedIndex = 0;
   state = State::LIST;
   reloadCounts();
@@ -98,6 +104,7 @@ void ReadwiseLibraryActivity::onEnter() {
 
 void ReadwiseLibraryActivity::onExit() {
   Activity::onExit();
+  rememberLocation();
   window.clear();
   engine.reset();
   if (wifiActivated) {
@@ -107,6 +114,17 @@ void ReadwiseLibraryActivity::onExit() {
     // library.
     silentRestartToReadwise();
   }
+}
+
+void ReadwiseLibraryActivity::rememberLocation() {
+  // Value-change guarded: switching views with Left/Right must not rewrite
+  // state.json on every press.
+  const auto current = static_cast<uint8_t>(locationIndex);
+  if (APP_STATE.readwiseLocationIndex == current) {
+    return;
+  }
+  APP_STATE.readwiseLocationIndex = current;
+  APP_STATE.saveToFile();
 }
 
 void ReadwiseLibraryActivity::reloadCounts() {
@@ -385,6 +403,9 @@ void ReadwiseLibraryActivity::performDownload() {
       }
     }
     APP_STATE.openEpubPath = bodyPath;
+    // The restart below skips onExit(), so record the view here or Back out of
+    // the article would land on Later instead of the one it was opened from.
+    APP_STATE.readwiseLocationIndex = static_cast<uint8_t>(locationIndex);
     APP_STATE.saveToFile();
     // The WiFi/TLS session just fragmented the heap the reader needs; the
     // silent restart both sheds it and lands directly in the managed reader.

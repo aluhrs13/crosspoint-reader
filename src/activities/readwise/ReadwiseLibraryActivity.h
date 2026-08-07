@@ -51,6 +51,8 @@ class ReadwiseLibraryActivity final : public Activity {
   static void sImageProgress(void* ctx, size_t done, size_t total);
   void queueArchive(const readwise::Document& doc);
   void jumpToLocation(int index);
+  // Persists locationIndex so Back out of an article returns to this view.
+  void rememberLocation();
   // Direct-jump targets for the Left/Right buttons: from Later they lead to
   // Shortlist and Feed; from Shortlist or Feed the button for the current view
   // leads back to Later. The hint labels name the destination view.
