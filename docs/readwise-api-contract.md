@@ -307,6 +307,13 @@ solve the attachment problem either. The firmware stays on v2.
   cannot be attached after the fact either.
 * Checked by hand in the Reader web UI: none of the four appear inline or in
   the parent document's Notebook tab.
+* **Undocumented fields do not help.** A Reader-native highlight carries its
+  text in `content` (API-created ones have `content: ""` and the text in
+  `title`), but passing `content` on CREATE is silently discarded, as are
+  `parent`, `parent_document_id`, and `document_id`. `content` is evidently
+  server-populated only when Reader itself creates the highlight. A CREATE
+  with neither `title` nor `content` is still accepted with `201`, producing
+  a permanently empty, unattached, un-editable document.
 
 ## Rate limiting
 
