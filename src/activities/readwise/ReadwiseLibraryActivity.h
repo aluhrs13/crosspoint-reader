@@ -32,6 +32,12 @@ class ReadwiseLibraryActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
+#ifdef CROSSPOINT_READWISE_ONLY
+  // This library is the home screen in the Readwise-only build, so the home
+  // gesture must not try to navigate to a home behind it -- that would replace
+  // this activity with another copy of itself.
+  bool isHomeActivity() const override { return true; }
+#endif
 
  private:
   enum class State : uint8_t {
@@ -94,4 +100,9 @@ class ReadwiseLibraryActivity final : public Activity {
   // does not also open the document.
   bool archiveTriggered = false;
   bool wifiActivated = false;
+  // Back is also what navigates *into* this screen (from Settings, or out of a
+  // managed article), and the button is often still held when the activity is
+  // constructed. Without this, the trailing release acts again immediately and
+  // bounces straight back out to where the user just came from.
+  bool ignoreBackUntilReleased = false;
 };

@@ -98,6 +98,8 @@ void ReadwiseLibraryActivity::onEnter() {
       APP_STATE.readwiseLocationIndex < locationCount ? static_cast<int>(APP_STATE.readwiseLocationIndex) : 0;
   selectedIndex = 0;
   state = State::LIST;
+  // Entered by a Back press that is very likely still held; see the member.
+  ignoreBackUntilReleased = mappedInput.isPressed(MappedInputManager::Button::Back);
   reloadCounts();
   requestUpdate();
 }
@@ -170,6 +172,15 @@ void ReadwiseLibraryActivity::jumpToLocation(const int index) {
 }
 
 void ReadwiseLibraryActivity::loop() {
+  if (ignoreBackUntilReleased) {
+    // Skip this frame entirely so the in-flight Back release is consumed
+    // without acting on it.
+    if (!mappedInput.isPressed(MappedInputManager::Button::Back)) {
+      ignoreBackUntilReleased = false;
+    }
+    return;
+  }
+
   if (state == State::DOWNLOAD_FAILED) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Back) ||
         mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
