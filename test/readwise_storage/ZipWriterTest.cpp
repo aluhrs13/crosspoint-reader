@@ -6,17 +6,16 @@
 // against the spec, and ZipWriterExternalTest additionally hands the output to
 // a real ZIP implementation.
 
-#include "lib/Readwise/ZipWriter.h"
-
 #include <gtest/gtest.h>
 
 #include <string>
 #include <vector>
 
 #include "FakeReadwise.h"
+#include "lib/Readwise/ZipWriter.h"
 
-using readwise::ZipWriter;
 using readwise::zipCrc32;
+using readwise::ZipWriter;
 using testing_support::FakeFileStore;
 
 namespace {
@@ -27,8 +26,7 @@ uint16_t read16(const std::vector<uint8_t>& data, size_t offset) {
 
 uint32_t read32(const std::vector<uint8_t>& data, size_t offset) {
   return static_cast<uint32_t>(data[offset]) | (static_cast<uint32_t>(data[offset + 1]) << 8) |
-         (static_cast<uint32_t>(data[offset + 2]) << 16) |
-         (static_cast<uint32_t>(data[offset + 3]) << 24);
+         (static_cast<uint32_t>(data[offset + 2]) << 16) | (static_cast<uint32_t>(data[offset + 3]) << 24);
 }
 
 std::string nameAt(const std::vector<uint8_t>& data, size_t offset, size_t len) {
@@ -69,8 +67,7 @@ TEST(ZipWriter, WritesWellFormedSingleEntryArchive) {
   // Local file header.
   EXPECT_EQ(read32(archive, 0), 0x04034b50u);
   EXPECT_EQ(read16(archive, 8), 0u) << "method must be stored";
-  EXPECT_EQ(read32(archive, 14),
-            zipCrc32(0, reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  EXPECT_EQ(read32(archive, 14), zipCrc32(0, reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
   EXPECT_EQ(read32(archive, 18), payload.size()) << "compressed size";
   EXPECT_EQ(read32(archive, 22), payload.size()) << "uncompressed size";
   EXPECT_EQ(read16(archive, 26), nameLen);
@@ -160,8 +157,7 @@ TEST(ZipWriter, CopiesAnExistingStoreFileIntoTheArchive) {
   const size_t nameLen = 18;
   EXPECT_EQ(read32(archive, 18), payload.size());
   EXPECT_EQ(read32(archive, 14), zipCrc32(0, payload.data(), payload.size()));
-  const std::vector<uint8_t> stored(archive.begin() + 30 + nameLen,
-                                    archive.begin() + 30 + nameLen + payload.size());
+  const std::vector<uint8_t> stored(archive.begin() + 30 + nameLen, archive.begin() + 30 + nameLen + payload.size());
   EXPECT_EQ(stored, payload);
 }
 

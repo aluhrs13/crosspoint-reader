@@ -101,8 +101,7 @@ TEST(ZipWriterExternal, PythonZipfileAcceptsTheArchive) {
       "assert z.read('OEBPS/empty.txt')==b'';"
       "assert z.read('OEBPS/images/0.jpg')==bytes(range(256))*4";
 
-  const std::string command =
-      std::string(python) + " -c " + quoted(script) + " " + quoted(path);
+  const std::string command = std::string(python) + " -c " + quoted(script) + " " + quoted(path);
   EXPECT_EQ(std::system(command.c_str()), 0) << "Python zipfile rejected the archive at " << path;
 
   std::remove(path.c_str());
