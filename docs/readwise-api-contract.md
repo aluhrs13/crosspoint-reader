@@ -252,9 +252,9 @@ text), and sends `title`/`source_url` from the cached document. Rate limit
   never moved. The position-matching sync Readwise documents is
   extension↔Reader; there is no observable v2→Reader propagation at the API
   level. (Whether Reader's *web UI* surfaces the Readwise-side highlight in a
-  matching document's Notebook tab was checked by hand: it does not.) The
-  Reader API v3 itself has no highlight-creation endpoint — v2 is the only
-  write path, the same one KOReader-style integrations use.
+  matching document's Notebook tab was checked by hand: it does not.) See
+  [Creating highlights via Reader v3](#creating-highlights-via-reader-v3) for
+  the other write path and why it does not help either.
 * **The linkage is by internal id, not matchable fields.** A highlight made in
   the Reader UI produced a v3 child document AND a v2 book with
   `source: "reader"` and `location_type: "offset"` — a *different* book from
@@ -275,6 +275,38 @@ text), and sends `title`/`source_url` from the cached document. Rate limit
   "Quotes" book with `category: "books"` — the fallback when a document has
   been evicted from the local cache.
 * Cleanup path `DELETE /api/v2/highlights/<id>/` returns `204`.
+
+## Creating highlights via Reader v3
+
+Readwise support suggested Document CREATE with `category: "highlight"` as the
+way to get highlights that behave like Reader-native ones. It does create real
+highlight-category Reader documents, but they are **orphans**, so it does not
+solve the attachment problem either. The firmware stays on v2.
+
+**Verified:**
+
+* `category: "highlight"` is honoured **only when `html` is omitted**. Passing
+  `html` silently coerces the document to `category: "article"` — which is why
+  an earlier round of testing wrongly concluded v3 could not create highlights
+  at all. With `url` + `title` (the highlight text) + `category: "highlight"`
+  and no `html`, the category sticks.
+* `should_clean_html: false` requires `author` and `title` (`400` otherwise),
+  and still yields `category: "article"`.
+* `category` is not honoured uniformly: a control save with `category: "email"`
+  also came back as `article`.
+* **No linkage to the parent document is achievable.** Four variants, all
+  `201`, all with `parent_id: null` after 90 s:
+  * `parent_id` passed on CREATE — accepted, silently ignored
+  * `url` = the parent's Reader URL (`read.readwise.io/read/<id>`)
+  * `url` = the parent's `source_url` byte-identical — and note this creates a
+    **new** document rather than deduping into the parent, so highlight-category
+    documents occupy a separate URL namespace
+  * a control with an unrelated URL
+* `PATCH /api/v3/update/<id>/` on a highlight document is refused outright:
+  `400 ["Updating 'highlight' documents is not supported."]` — so `parent_id`
+  cannot be attached after the fact either.
+* Checked by hand in the Reader web UI: none of the four appear inline or in
+  the parent document's Notebook tab.
 
 ## Rate limiting
 
