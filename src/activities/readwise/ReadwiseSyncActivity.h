@@ -40,6 +40,7 @@ class ReadwiseSyncActivity final : public Activity {
 
   void onWifiSelectionComplete(bool connected);
   void performSync();
+  void renderComplete() const;
 
   State state = State::CONNECTING;
   std::string statusMessage;
@@ -48,5 +49,7 @@ class ReadwiseSyncActivity final : public Activity {
   uint16_t bodiesDone = 0;
   uint16_t bodiesTotal = 0;
   uint16_t bodiesFailed = 0;
+  // Title of the first article that failed, named on the summary screen.
+  std::string failedTitle;
   bool wifiActivated = false;
 };

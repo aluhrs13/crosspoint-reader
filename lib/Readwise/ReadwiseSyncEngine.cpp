@@ -849,6 +849,12 @@ ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(co
       return outcome;
     } else {
       // Skip this document; the library's on-demand path is the retry.
+      if (outcome.failed == 0) {
+        outcome.failedStatus = status;
+        if (haveDoc) {
+          copyBounded(outcome.failedTitle, TITLE_CAP, scratchDoc_.title, strlen(scratchDoc_.title));
+        }
+      }
       ++outcome.failed;
     }
     ++done;

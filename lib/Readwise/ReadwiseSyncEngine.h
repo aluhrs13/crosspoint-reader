@@ -149,6 +149,12 @@ class ReadwiseSyncEngine {
     uint16_t downloaded = 0;
     uint16_t failed = 0;
     uint16_t total = 0;
+    // Title and cause of the FIRST document that failed, so the summary can
+    // name what went wrong instead of only counting it. Empty when nothing
+    // failed. Only the first is kept: the summary shows one title plus a
+    // count, and carrying every title would be unbounded.
+    char failedTitle[TITLE_CAP] = {};
+    ApiStatus failedStatus = ApiStatus::Ok;
   };
   BodySyncOutcome downloadMissingBodies(const BodySyncHooks& hooks);
 
