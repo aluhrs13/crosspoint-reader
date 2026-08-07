@@ -60,6 +60,9 @@ class ArticleBodyWriter : public BodySink {
   // text, which is the same outcome as a failed download.
   static constexpr size_t URL_ARENA_CAP = 3072;
 
+  // Emits the document prologue on first use; a no-op afterwards.
+  bool emitPrologueOnce();
+
   ReadwiseFileStore& store_;
   std::string destPath_;
   ArticleXhtmlWriter writer_;
@@ -71,6 +74,11 @@ class ArticleBodyWriter : public BodySink {
   size_t imageCount_ = 0;
 
   bool open_ = false;
+  // Whether the XHTML prologue has been emitted. Distinct from open_: the
+  // writer buffers output, so nothing reaches the store (and open_ stays
+  // false) until the first flush. Guarding the prologue on open_ emitted a
+  // second one on every body delivered in more than one chunk.
+  bool prologueWritten_ = false;
   bool committed_ = false;
   bool failed_ = false;
 };

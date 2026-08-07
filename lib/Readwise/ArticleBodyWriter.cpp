@@ -87,14 +87,25 @@ void ArticleBodyWriter::abort() {
   failed_ = true;
 }
 
+bool ArticleBodyWriter::emitPrologueOnce() {
+  if (prologueWritten_) {
+    return true;
+  }
+  if (!writer_.begin()) {
+    abort();
+    return false;
+  }
+  prologueWritten_ = true;
+  return true;
+}
+
 bool ArticleBodyWriter::onBodyChunk(const char* data, size_t len) {
   if (failed_) {
     return false;
   }
   // The prologue is emitted lazily on the first chunk so that a body which
   // never arrives leaves no temp file at all.
-  if (!open_ && !writer_.begin()) {
-    abort();
+  if (!emitPrologueOnce()) {
     return false;
   }
   if (!writer_.feed(data, len)) {
@@ -114,8 +125,7 @@ bool ArticleBodyWriter::onBodyEnd(bool complete) {
     abort();
     return false;
   }
-  if (!open_ && !writer_.begin()) {
-    abort();
+  if (!emitPrologueOnce()) {
     return false;
   }
   if (!writer_.finish()) {

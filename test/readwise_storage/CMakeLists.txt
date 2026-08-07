@@ -3,6 +3,7 @@ add_executable(ReadwiseStorageTest
   ReadwiseSyncEngineTest.cpp
   ZipWriterTest.cpp
   ArticleAssemblerTest.cpp
+  ArticleBodyWriterTest.cpp
   ZipWriterExternalTest.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseDocument.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseCodec.cpp
