@@ -36,7 +36,17 @@ jobs:
           restore-keys: pio-${{ runner.os }}-
 
       - name: Build CrossPoint
-        run: pio run -e gh_release
+        # Both envs in ONE pio invocation: a second `pio run` can wipe the whole
+        # .pio/build tree, deleting firmware.bin before the upload below.
+        run: pio run -e gh_release -e readwise
+
+      - name: Stage release assets
+        # The readwise variant asks OTA for "firmware-readwise.bin" (see
+        # OTA_FIRMWARE_ASSET_NAME), so it must be published under that name —
+        # both envs build a file called firmware.bin.
+        run: |
+          set -euo pipefail
+          cp .pio/build/readwise/firmware.bin firmware-readwise.bin
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -48,6 +58,7 @@ jobs:
             .pio/build/gh_release/firmware.elf
             .pio/build/gh_release/firmware.map
             .pio/build/gh_release/partitions.bin
+            firmware-readwise.bin
 
       - name: Publish GitHub release
         env:
@@ -56,9 +67,9 @@ jobs:
           set -euo pipefail
           firmware=".pio/build/gh_release/firmware.bin"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$firmware" --clobber
+            gh release upload "$GITHUB_REF_NAME" "$firmware" firmware-readwise.bin --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "$firmware" \
+            gh release create "$GITHUB_REF_NAME" "$firmware" firmware-readwise.bin \
               --verify-tag \
               --generate-notes \
               --title "CrossPoint Reader $GITHUB_REF_NAME"
