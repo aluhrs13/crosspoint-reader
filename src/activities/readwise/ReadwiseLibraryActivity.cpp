@@ -368,6 +368,11 @@ void ReadwiseLibraryActivity::performDownload() {
     }
   }
 
+  // The fetch blocked the main loop for its whole duration; without this the
+  // inactivity timer is already past the timeout and the device would sleep
+  // the instant control returns, hiding the outcome.
+  activityManager.noteBlockingWorkFinished();
+
   if (status == readwise::ApiStatus::Ok) {
     // Persist the body flag in docs.bin, or the restart below would show the
     // article as not downloaded and fetch it again on reopen.

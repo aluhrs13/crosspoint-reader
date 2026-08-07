@@ -63,6 +63,10 @@ void ReadwiseSyncActivity::onWifiSelectionComplete(const bool connected) {
   // stares at the WiFi picker for the whole sync.
   requestUpdateAndWait();
   performSync();
+  // The sync blocked the main loop for its whole duration; without this the
+  // inactivity timer is already past the timeout and the result screen would
+  // be replaced by the sleep screen immediately.
+  activityManager.noteBlockingWorkFinished();
 }
 
 void ReadwiseSyncActivity::performSync() {
