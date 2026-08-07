@@ -24,7 +24,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   // on top of the TLS session's heap during the fetch; with -fno-exceptions an
   // OOM there aborts. fetchUrl handles the verified-https GET, redirects, and
   // User-Agent (see HttpDownloader).
-  ReleaseJsonParser releaseParser;
+  ReleaseJsonParser releaseParser(ForkConfig::OTA_FIRMWARE_ASSET);
   const bool ok =
       HttpDownloader::fetchUrl(ForkConfig::OTA_LATEST_RELEASE_URL, [&releaseParser](const uint8_t* data, size_t len) {
         releaseParser.feed(reinterpret_cast<const char*>(data), len);
@@ -44,7 +44,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   }
 
   if (!releaseParser.foundFirmware()) {
-    LOG_ERR("OTA", "No firmware.bin asset found");
+    LOG_ERR("OTA", "No %s asset found", ForkConfig::OTA_FIRMWARE_ASSET);
     return NO_UPDATE;
   }
 

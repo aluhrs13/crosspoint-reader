@@ -7,7 +7,10 @@
 
 class ReleaseJsonParser {
  public:
-  ReleaseJsonParser();
+  // assetName selects which release asset counts as the firmware image; it must
+  // outlive the parser (callers pass a string literal). Firmware variants each
+  // publish their own asset, so the caller decides which one to look for.
+  explicit ReleaseJsonParser(const char* assetName = "firmware.bin");
 
   ReleaseJsonParser(const ReleaseJsonParser&) = delete;
   ReleaseJsonParser& operator=(const ReleaseJsonParser&) = delete;
@@ -50,6 +53,8 @@ class ReleaseJsonParser {
   void commitAsset();
 
   StreamingJsonParser parser;
+
+  const char* firmwareAssetName;
 
   Position position;
   LastKey lastKey;
