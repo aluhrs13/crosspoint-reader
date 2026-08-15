@@ -155,7 +155,14 @@ SyncOutcome ReadwiseSyncEngine::sync() {
     outcome.status = pullStatus;
     return outcome;
   }
-  outcome.pulled = static_cast<uint16_t>(staged.size());
+  // Tombstones (seen items in unread-only locations) are evictions, not
+  // pulled documents; only real records count.
+  outcome.pulled = 0;
+  for (const StagedRef& ref : staged) {
+    if (ref.length > 0) {
+      ++outcome.pulled;
+    }
+  }
 
   // --- 4. Merge and rebuild indexes --------------------------------------
   outcome.failedStage = SyncStage::RebuildingIndexes;
@@ -240,6 +247,15 @@ ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::v
         // A read document in an unread-only location is never staged, but its
         // updated_at still advances the checkpoint -- otherwise the same read
         // items would be re-walked on every sync.
+        //
+        // It still leaves a zero-length tombstone: without one, an item read
+        // on ANOTHER device is skipped here, the merge then finds no staged
+        // replacement, and the stale unseen record is carried over forever --
+        // the item never disappears from the feed.
+        StagedRef tombstone{};
+        copyBounded(tombstone.id, ID_CAP, copy.id, strlen(copy.id));
+        tombstone.length = 0;
+        staged->push_back(tombstone);
         advanceCursor(copy);
         return true;
       }
@@ -449,6 +465,9 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
   };
 
   for (const StagedRef& ref : staged) {
+    if (ref.length == 0) {
+      continue;  // tombstone: nothing staged; its work happens in carry-over
+    }
     if (nonFeedWritten >= documentCap_ && feedWritten >= feedCap_) {
       break;
     }
@@ -504,14 +523,20 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       }
       readOffset += static_cast<uint32_t>(consumed);
 
-      bool superseded = false;
+      const StagedRef* superseding = nullptr;
       for (const StagedRef& ref : staged) {
         if (sameId(ref.id, scratchDoc_.id)) {
-          superseded = true;
+          superseding = &ref;
           break;
         }
       }
-      if (superseded) {
+      if (superseding != nullptr) {
+        if (superseding->length == 0) {
+          // A tombstone: the pull saw this document seen in an unread-only
+          // location and deliberately staged no replacement. The record dies
+          // here, and its body with it -- no surviving copy carries the flag.
+          store_.removeTree(articleDir(scratchDoc_.id));
+        }
         continue;
       }
       applyQueuedOverrides(scratchDoc_);
