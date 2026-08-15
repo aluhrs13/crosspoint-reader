@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "ArticleAssembler.h"
 #include "ReadwiseApi.h"
 #include "ReadwiseCodec.h"
 #include "ReadwiseFileStore.h"
@@ -48,6 +49,7 @@ inline constexpr LocationPolicy SYNCED_LOCATIONS[] = {
 
 constexpr const LocationPolicy* policyFor(Location location) {
   for (const LocationPolicy& policy : SYNCED_LOCATIONS) {
+    // cppcheck-suppress useStlAlgorithm  // constexpr lookup over a 3-entry table; find_if buys nothing here
     if (policy.location == location) {
       return &policy;
     }
@@ -135,6 +137,11 @@ class ReadwiseSyncEngine {
     // Blocking wait; the activity supplies delay(). Never called with more
     // than RATE_LIMIT_WAIT_CAP_MS.
     void (*sleepMs)(void* ctx, uint32_t ms) = nullptr;
+    // Supplies image bytes during assembly. Optional: without it articles are
+    // still built and read correctly, their images degrading to alt text.
+    // Injected rather than constructed here so the engine stays free of
+    // network headers and host-testable.
+    ArticleImageFetcher* imageFetcher = nullptr;
   };
   struct BodySyncOutcome {
     bool ok = false;
@@ -142,6 +149,12 @@ class ReadwiseSyncEngine {
     uint16_t downloaded = 0;
     uint16_t failed = 0;
     uint16_t total = 0;
+    // Title and cause of the FIRST document that failed, so the summary can
+    // name what went wrong instead of only counting it. Empty when nothing
+    // failed. Only the first is kept: the summary shows one title plus a
+    // count, and carrying every title would be unbounded.
+    char failedTitle[TITLE_CAP] = {};
+    ApiStatus failedStatus = ApiStatus::Ok;
   };
   BodySyncOutcome downloadMissingBodies(const BodySyncHooks& hooks);
 
@@ -168,6 +181,10 @@ class ReadwiseSyncEngine {
   std::string journalPath() const { return baseDir_ + "/journal.bin"; }
   std::string checkpointPath() const { return baseDir_ + "/checkpoint.bin"; }
   std::string indexPath(Location location) const;
+  // An article is a directory, not a file: the archive plus the Epub cache the
+  // reader builds beside it (sections, extracted images, pixel caches, cover).
+  // Keeping them together makes eviction one recursive delete.
+  std::string articleDir(const char* id) const;
   std::string bodyPath(const char* id) const;
 
  private:

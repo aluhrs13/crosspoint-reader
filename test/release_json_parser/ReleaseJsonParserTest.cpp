@@ -598,3 +598,40 @@ TEST(ReleaseJsonParser, ChunkedRealisticEveryBoundary) {
     EXPECT_EQ(p.getFirmwareSize(), 9999u) << "split=" << split;
   }
 }
+
+TEST(ReleaseJsonParser, SelectsVariantAssetByName) {
+  // A release publishes one asset per firmware variant; each build must pick
+  // its own or it would install a different variant's image.
+  const char* json = R"({
+      "tag_name": "v1.6.0",
+      "assets": [
+        {"name": "firmware.bin", "browser_download_url": "https://example.com/std", "size": 1000},
+        {"name": "firmware-readwise.bin", "browser_download_url": "https://example.com/rw", "size": 2000}
+      ]
+    })";
+
+  ReleaseJsonParser standard;
+  standard.feed(json, strlen(json));
+  EXPECT_TRUE(standard.foundFirmware());
+  EXPECT_STREQ(standard.getFirmwareUrl(), "https://example.com/std");
+  EXPECT_EQ(standard.getFirmwareSize(), 1000u);
+
+  ReleaseJsonParser readwise("firmware-readwise.bin");
+  readwise.feed(json, strlen(json));
+  EXPECT_TRUE(readwise.foundFirmware());
+  EXPECT_STREQ(readwise.getFirmwareUrl(), "https://example.com/rw");
+  EXPECT_EQ(readwise.getFirmwareSize(), 2000u);
+}
+
+TEST(ReleaseJsonParser, VariantAssetMissingIsNotFound) {
+  // Releases predating the variant carry only firmware.bin. The variant must
+  // report "no update" rather than falling back to the standard image.
+  const char* json =
+      R"({"tag_name":"v1.5.0","assets":[{"name":"firmware.bin","browser_download_url":"https://a","size":1}]})";
+
+  ReleaseJsonParser readwise("firmware-readwise.bin");
+  readwise.feed(json, strlen(json));
+
+  EXPECT_TRUE(readwise.foundTag());
+  EXPECT_FALSE(readwise.foundFirmware());
+}

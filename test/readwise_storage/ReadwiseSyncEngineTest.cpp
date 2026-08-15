@@ -601,6 +601,32 @@ TEST(ReadwiseSync, SeenFeedDocIsRemovedOnNextSync) {
   EXPECT_FALSE(f.store.has(body)) << "the body goes with the record";
 }
 
+// The same cleanup for an item read on ANOTHER device: the next pull returns
+// it seen, the sink deliberately stages no replacement -- and the stale unseen
+// record in docs.bin must die with it rather than being carried over forever.
+TEST(ReadwiseSync, RemotelySeenFeedDocIsRemovedOnNextSync) {
+  Fixture f;
+  pushEmptyPagesForNonFeed(f);
+  f.api.pages.push_back({{makeDoc("f1", Location::Feed, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  const std::string body = f.engine.bodyPath("f1");
+  f.store.put(body, {'t', 'e', 'x', 't'});
+  ASSERT_TRUE(f.engine.setBodyCached("f1", true));
+
+  // Read elsewhere: the server now reports it seen with a later updated_at.
+  pushEmptyPagesForNonFeed(f);
+  f.api.pages.push_back({{makeSeenDoc("f1", Location::Feed, kT2, kT2)}, "", ApiStatus::Ok});
+  const SyncOutcome outcome = f.engine.sync();
+  ASSERT_TRUE(outcome.ok) << "failed at stage " << static_cast<int>(outcome.failedStage);
+  EXPECT_EQ(outcome.pulled, 0) << "a seen replacement is an eviction, not a pulled document";
+
+  Document doc;
+  EXPECT_FALSE(f.engine.findDocument("f1", doc)) << "a feed item read elsewhere must leave docs.bin at the next sync";
+  EXPECT_EQ(f.engine.indexCount(Location::Feed), 0u);
+  EXPECT_FALSE(f.store.has(body)) << "the body goes with the record";
+}
+
 // The removal is deliberately deferred to the next sync: rebuildLocal runs on
 // every library entry, and the article the user just read must stay openable.
 TEST(ReadwiseSync, RebuildLocalDoesNotRemoveSeenFeedDoc) {

@@ -1,8 +1,10 @@
 // Covers the host-testable half of the HTTP client -- URL construction, PATCH
-// bodies, status mapping, retry-after parsing -- plus the BodyTextWriter
-// pipeline against the fake file store. The device-only transport wiring in
-// HttpReadwiseApi is deliberately thin so that everything decision-shaped is
-// exercised here.
+// bodies, status mapping, retry-after parsing. The device-only transport
+// wiring in HttpReadwiseApi is deliberately thin so that everything
+// decision-shaped is exercised here.
+//
+// The body pipeline moved to ArticleBodyWriter and is covered by
+// test/readwise_storage/ArticleAssemblerTest.cpp.
 
 #include <gtest/gtest.h>
 
@@ -10,13 +12,11 @@
 #include <string>
 
 #include "FakeReadwise.h"
-#include "lib/Readwise/BodyTextWriter.h"
 #include "lib/Readwise/ReadwiseClientCore.h"
 
 namespace {
 
 using namespace readwise;
-using testing_support::FakeFileStore;
 
 }  // namespace
 
@@ -121,65 +121,4 @@ TEST(ReadwiseClientCore, DocumentIdValidation) {
   EXPECT_FALSE(isValidDocumentId("a/b"));
   EXPECT_FALSE(isValidDocumentId("UPPERCASE0123456789012345"));
   EXPECT_FALSE(isValidDocumentId("short"));
-}
-
-// --- BodyTextWriter -------------------------------------------------------
-
-TEST(BodyTextWriter, ConvertsAndCommitsACompleteBody) {
-  FakeFileStore store;
-  BodyTextWriter writer(store, "/.crosspoint/readwise/bodies/doc1.txt");
-
-  const std::string html = "<div><p>Hello &amp; welcome.</p><p>Second.</p></div>";
-  // Deliver in two chunks like the fake API does.
-  ASSERT_TRUE(writer.onBodyChunk(html.data(), html.size() / 2));
-  ASSERT_TRUE(writer.onBodyChunk(html.data() + html.size() / 2, html.size() - html.size() / 2));
-  ASSERT_TRUE(writer.onBodyEnd(true));
-  EXPECT_TRUE(writer.committed());
-
-  const auto& file = store.files().at("/.crosspoint/readwise/bodies/doc1.txt");
-  EXPECT_EQ(std::string(file.begin(), file.end()), "Hello & welcome.\n\nSecond.\n");
-}
-
-TEST(BodyTextWriter, IncompleteBodyCommitsNothing) {
-  FakeFileStore store;
-  {
-    BodyTextWriter writer(store, "/.crosspoint/readwise/bodies/doc2.txt");
-    const char* html = "<p>only half an artic";
-    ASSERT_TRUE(writer.onBodyChunk(html, strlen(html)));
-    EXPECT_FALSE(writer.onBodyEnd(false));
-    EXPECT_FALSE(writer.committed());
-  }
-  EXPECT_FALSE(store.has("/.crosspoint/readwise/bodies/doc2.txt"))
-      << "a torn body must never be mistaken for a cached article";
-}
-
-TEST(BodyTextWriter, DestructionMidBodyLeavesNoFile) {
-  FakeFileStore store;
-  {
-    BodyTextWriter writer(store, "/.crosspoint/readwise/bodies/doc3.txt");
-    const char* html = "<p>transfer died here";
-    ASSERT_TRUE(writer.onBodyChunk(html, strlen(html)));
-    // Destroyed without onBodyEnd -- the transfer error path.
-  }
-  EXPECT_FALSE(store.has("/.crosspoint/readwise/bodies/doc3.txt"));
-}
-
-TEST(BodyTextWriter, EmptyBodyStillCommits) {
-  FakeFileStore store;
-  BodyTextWriter writer(store, "/.crosspoint/readwise/bodies/doc4.txt");
-  ASSERT_TRUE(writer.onBodyEnd(true));
-  EXPECT_TRUE(writer.committed());
-  EXPECT_TRUE(store.has("/.crosspoint/readwise/bodies/doc4.txt"))
-      << "'fetched and empty' must stay distinguishable from 'never fetched'";
-}
-
-TEST(BodyTextWriter, FailedStoreWritePropagates) {
-  FakeFileStore store;
-  store.failAtWrite(1);  // the commit is the first durable write
-  BodyTextWriter writer(store, "/.crosspoint/readwise/bodies/doc5.txt");
-  const char* html = "<p>text</p>";
-  ASSERT_TRUE(writer.onBodyChunk(html, strlen(html)));
-  EXPECT_FALSE(writer.onBodyEnd(true));
-  EXPECT_FALSE(writer.committed());
-  EXPECT_TRUE(writer.failed());
 }

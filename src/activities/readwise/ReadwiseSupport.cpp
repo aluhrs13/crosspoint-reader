@@ -22,7 +22,19 @@ std::string bodyPathForId(const char* id) {
   if (!readwise::isValidDocumentId(id)) {
     return {};
   }
-  return std::string(bodiesPrefix()) + id + ".txt";
+  return std::string(bodiesPrefix()) + id + "/article.epub";
+}
+
+std::string articleDirForId(const char* id) {
+  if (!readwise::isValidDocumentId(id)) {
+    return {};
+  }
+  return std::string(bodiesPrefix()) + id;
+}
+
+std::string articleDirForBodyPath(const std::string& path) {
+  const std::string id = idFromBodyPath(path);
+  return id.empty() ? std::string() : std::string(bodiesPrefix()) + id;
 }
 
 bool isBodyPath(const std::string& path) { return path.rfind(bodiesPrefix(), 0) == 0; }
@@ -31,12 +43,11 @@ std::string idFromBodyPath(const std::string& path) {
   if (!isBodyPath(path)) {
     return {};
   }
+  // The id is the directory segment: ".../bodies/<id>/article.epub".
   const size_t start = std::string(bodiesPrefix()).size();
-  const size_t dot = path.rfind(".txt");
-  if (dot == std::string::npos || dot <= start) {
-    return {};
-  }
-  return path.substr(start, dot - start);
+  const size_t slash = path.find('/', start);
+  const std::string id = slash == std::string::npos ? path.substr(start) : path.substr(start, slash - start);
+  return readwise::isValidDocumentId(id.c_str()) ? id : std::string();
 }
 
 std::string titleForBodyPath(const std::string& path) {

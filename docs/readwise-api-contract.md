@@ -268,11 +268,19 @@ Against real Reader data this silently discards:
 
 Settled for phase 2 to build against.
 
-### Content is stream-stripped to plain text
+### Content is stream-converted to a store-only EPUB
 
-The API offers no plain-text body — `content` is not it, and `html_content` is the only source. The device fetches `html_content` and strips tags on the fly into a plain-text file on SD, keeping paragraph breaks and discarding everything else.
+**Revised.** The MVP stripped `html_content` to plain text on the way to SD, explicitly trading away headings, emphasis, and images in order to avoid the EPUB layout and section-cache pipeline.
 
-*Why:* it avoids routing Readwise documents through the EPUB layout and section-cache pipeline, which is the larger cost by far, and it keeps peak RAM at one chunk rather than one document. The trade is losing headings, emphasis, and images. Given an 88 KB body against a 380 KB ceiling, this is the only option that fits without new machinery.
+That trade has been reversed. `html_content` is now rebuilt as well-formed XHTML as it streams, and packaged into a store-only EPUB at `bodies/<id>/article.epub`, so articles go through the *stock* EPUB path.
+
+*Why:* the thing being avoided turned out to be the thing worth reusing. The EPUB pipeline already parses `<img>`, honours the image-rendering setting, decodes JPEG and PNG behind free-heap gates, dithers, caches decoded pixels, and renders in grayscale strip bands. Routing articles through it costs no new rendering machinery at all -- only a ZIP writer and an HTML-to-XHTML converter, both pure and host-tested. Peak RAM is still one chunk: nothing is buffered whole at any stage.
+
+*The constraint that shapes it:* `ChapterHtmlSlimParser` is real expat and aborts the whole section build on the first parse error, so the generated XHTML must be well-formed or the article renders as nothing. `ArticleXhtmlWriter` therefore guarantees balance by construction -- an explicit element stack, not validation -- and scrubs the invalid UTF-8 and control characters that scraped web markup routinely carries.
+
+*Images:* fetched after the body's TLS session closes, since a nested request inside the read callback is impossible. Every per-image failure is non-fatal and degrades to `[Image: alt]`. Format is settled by sniffing magic bytes rather than trusting the URL, which is what makes extensionless CDN URLs work. Capped at 24 images and 3 MB per article.
+
+*Known gaps:* tables are dropped (emitting them would mean guaranteeing `tr`/`td` nesting too), `srcset` is ignored in favour of `src`, and article CSS is not carried.
 
 ### Synced locations: `later`, `shortlist`, and `feed` (unread-only)
 

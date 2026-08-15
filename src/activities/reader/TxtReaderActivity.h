@@ -13,11 +13,6 @@
 // library rather than the file browser/home. Defined at namespace scope
 // because GCC rejects a `{}` default argument of a nested aggregate with
 // default member initializers (PR96645).
-struct TxtManagedDocInfo {
-  std::string title;
-  bool managed = false;
-};
-
 class TxtReaderActivity final : public Activity {
   std::unique_ptr<Txt> txt;
 
@@ -52,15 +47,12 @@ class TxtReaderActivity final : public Activity {
   void saveProgress() const;
   void loadProgress();
 
-  TxtManagedDocInfo managedDoc;
-
  public:
   explicit TxtReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Txt> txt,
-                             int initialRefreshCountdown, TxtManagedDocInfo managedInfo = {})
+                             int initialRefreshCountdown)
       : Activity("TxtReader", renderer, mappedInput),
         txt(std::move(txt)),
-        pagesUntilFullRefresh(initialRefreshCountdown),
-        managedDoc(std::move(managedInfo)) {}
+        pagesUntilFullRefresh(initialRefreshCountdown) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;

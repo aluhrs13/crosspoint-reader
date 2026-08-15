@@ -36,3 +36,14 @@ TEST(ReleaseVersion, RejectsMalformedVersions) {
   EXPECT_FALSE(ReleaseVersion::isNewer("1.5.1-01", "1.5.0"));
   EXPECT_FALSE(ReleaseVersion::isNewer("1.5.1+", "1.5.0"));
 }
+
+TEST(ReleaseVersion, VariantBuildMetadataDoesNotReofferSameRelease) {
+  // Firmware variants tag themselves with build metadata ("+readwise"), which
+  // is ignored in precedence, so the matching release is not seen as newer.
+  EXPECT_FALSE(ReleaseVersion::isNewer("1.5.0", "1.5.0+readwise"));
+  EXPECT_TRUE(ReleaseVersion::isNewer("1.5.1", "1.5.0+readwise"));
+
+  // A "-readwise" PRERELEASE suffix would rank below the same tag, making the
+  // device re-offer the identical release forever. Guard against that choice.
+  EXPECT_TRUE(ReleaseVersion::isNewer("1.5.0", "1.5.0-readwise"));
+}

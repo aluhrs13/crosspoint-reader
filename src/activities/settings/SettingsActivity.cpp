@@ -12,10 +12,14 @@
 #include "ClearCacheActivity.h"
 #include "CrossPointSettings.h"
 #include "FontDownloadActivity.h"
+#ifndef CROSSPOINT_READWISE_ONLY
 #include "KOReaderSettingsActivity.h"
+#endif
 #include "LanguageSelectActivity.h"
 #include "MappedInputManager.h"
+#ifndef CROSSPOINT_READWISE_ONLY
 #include "OpdsServerListActivity.h"
+#endif
 #include "OtaUpdateActivity.h"
 #include "SdCardFontSystem.h"
 #include "SdFirmwareUpdateActivity.h"
@@ -41,12 +45,18 @@ void SettingsActivity::rebuildSettingsLists() {
   // reader activity ran — otherwise the font-family picker shows stale list.
   sdFontSystem.refreshIfDirty();
 
+#ifdef CROSSPOINT_READWISE_ONLY
+  // Dictionary support is compiled out; getSettingsList() null-guards.
+  std::vector<DictionaryEntry>* dictionariesArg = nullptr;
+#else
   // Rescan /dictionaries on every rebuild: cheap (one directory listing) and
   // picks up dictionaries copied to the SD card since the last visit.
   std::vector<DictionaryEntry> dictionaries;
   DictionaryRegistry::discover(dictionaries);
+  std::vector<DictionaryEntry>* dictionariesArg = &dictionaries;
+#endif
 
-  for (auto& setting : getSettingsList(&sdFontSystem.registry(), &dictionaries)) {
+  for (auto& setting : getSettingsList(&sdFontSystem.registry(), dictionariesArg)) {
     if (setting.category == StrId::STR_NONE_OPT) continue;
     if (setting.category == StrId::STR_CAT_DISPLAY) {
       displaySettings.push_back(setting);
@@ -72,10 +82,16 @@ void SettingsActivity::rebuildSettingsLists() {
                             SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons));
   }
   systemSettings.push_back(SettingInfo::Action(StrId::STR_WIFI_NETWORKS, SettingAction::Network));
+#ifndef CROSSPOINT_READWISE_ONLY
   systemSettings.push_back(SettingInfo::Action(StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync));
+#endif
   systemSettings.push_back(SettingInfo::Action(StrId::STR_READWISE, SettingAction::Readwise));
+#ifndef CROSSPOINT_READWISE_ONLY
   systemSettings.push_back(SettingInfo::Action(StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser));
+#endif
   systemSettings.push_back(SettingInfo::Action(StrId::STR_CLEAR_READING_CACHE, SettingAction::ClearCache));
+  systemSettings.push_back(
+      SettingInfo::Action(StrId::STR_CLEAR_READWISE_ARTICLES, SettingAction::ClearReadwiseArticles));
   // TODO: Touch devices need their own firmware update path/artifacts before OTA is exposed.
   if (!BoardConfig::hasTouch()) {
     systemSettings.push_back(SettingInfo::Action(StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates));
@@ -375,20 +391,29 @@ void SettingsActivity::toggleCurrentSetting() {
       case SettingAction::CustomiseStatusBar:
         startActivityForResult(std::make_unique<StatusBarSettingsActivity>(renderer, mappedInput), resultHandler);
         break;
+#ifndef CROSSPOINT_READWISE_ONLY
       case SettingAction::KOReaderSync:
         startActivityForResult(std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput), resultHandler);
         break;
+#endif
       case SettingAction::Readwise:
         startActivityForResult(std::make_unique<ReadwiseSettingsActivity>(renderer, mappedInput), resultHandler);
         break;
+#ifndef CROSSPOINT_READWISE_ONLY
       case SettingAction::OPDSBrowser:
         startActivityForResult(std::make_unique<OpdsServerListActivity>(renderer, mappedInput), resultHandler);
         break;
+#endif
       case SettingAction::Network:
         startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false), resultHandler);
         break;
       case SettingAction::ClearCache:
         startActivityForResult(std::make_unique<ClearCacheActivity>(renderer, mappedInput), resultHandler);
+        break;
+      case SettingAction::ClearReadwiseArticles:
+        startActivityForResult(
+            std::make_unique<ClearCacheActivity>(renderer, mappedInput, ClearCacheActivity::Mode::ReadwiseArticles),
+            resultHandler);
         break;
       case SettingAction::CheckForUpdates:
         startActivityForResult(std::make_unique<OtaUpdateActivity>(renderer, mappedInput), resultHandler);
@@ -414,6 +439,11 @@ void SettingsActivity::toggleCurrentSetting() {
       case SettingAction::Language:
         startActivityForResult(std::make_unique<LanguageSelectActivity>(renderer, mappedInput), resultHandler);
         break;
+#ifdef CROSSPOINT_READWISE_ONLY
+      // These features are compiled out; their enum values remain.
+      case SettingAction::KOReaderSync:
+      case SettingAction::OPDSBrowser:
+#endif
       case SettingAction::None:
         // Do nothing
         break;

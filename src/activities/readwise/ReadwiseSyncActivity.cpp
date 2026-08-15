@@ -11,11 +11,13 @@
 #include <cstdio>
 
 #include "ReadwiseCredentialStore.h"
+#include "ReadwiseImageFetcher.h"
 #include "ReadwiseSupport.h"
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
+#include "fontIds.h"
 
 void ReadwiseSyncActivity::onEnter() {
   Activity::onEnter();
@@ -62,6 +64,10 @@ void ReadwiseSyncActivity::onWifiSelectionComplete(const bool connected) {
   // stares at the WiFi picker for the whole sync.
   requestUpdateAndWait();
   performSync();
+  // The sync blocked the main loop for its whole duration; without this the
+  // inactivity timer is already past the timeout and the result screen would
+  // be replaced by the sleep screen immediately.
+  activityManager.noteBlockingWorkFinished();
 }
 
 void ReadwiseSyncActivity::performSync() {
@@ -110,6 +116,10 @@ void ReadwiseSyncActivity::performSync() {
       self->requestUpdate(true);
     };
     hooks.sleepMs = [](void*, uint32_t ms) { delay(ms); };
+    // Wi-Fi is already up for the metadata pass, so article images ride along
+    // with it and reading stays fully offline afterwards.
+    ReadwiseUi::HttpArticleImageFetcher imageFetcher;
+    hooks.imageFetcher = &imageFetcher;
     const auto bodies = engine->downloadMissingBodies(hooks);
     engine.reset();
 
@@ -117,6 +127,11 @@ void ReadwiseSyncActivity::performSync() {
     bodiesDone = bodies.downloaded;
     bodiesTotal = bodies.total;
     bodiesFailed = bodies.failed;
+    failedTitle = bodies.failedTitle;
+    if (bodies.failed > 0) {
+      LOG_ERR("RWSYNC", "%u body download(s) failed; first: \"%s\" (%s)", (unsigned)bodies.failed, bodies.failedTitle,
+              readwise::apiStatusName(bodies.failedStatus));
+    }
     if (bodies.ok) {
       state = State::COMPLETE;
     } else {
@@ -152,6 +167,62 @@ void ReadwiseSyncActivity::loop() {
   }
 }
 
+// The completion summary is the one screen with something to say, so it is
+// laid out as real lines rather than squeezed into drawPopup, which is a
+// single line and does not wrap.
+void ReadwiseSyncActivity::renderComplete() const {
+  const auto pageWidth = renderer.getScreenWidth();
+  const auto pageHeight = renderer.getScreenHeight();
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID) + 6;
+
+  // Centre the block: a clean sync is 2 lines, a sync with failures is 4 or 5.
+  int lines = bodiesTotal > 0 ? 2 : 1;
+  if (bodiesFailed > 0) {
+    lines += failedTitle.empty() ? 1 : 2;
+    if (bodiesFailed > 1) lines++;
+  }
+  int y = pageHeight / 2 - (lines * lineHeight) / 2;
+
+  renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_READWISE_SYNC_COMPLETE), true, EpdFontFamily::BOLD);
+  y += lineHeight;
+
+  if (bodiesTotal > 0) {
+    const std::string counts = std::to_string(bodiesDone) + "/" + std::to_string(bodiesTotal) + " " +
+                               std::string(tr(STR_READWISE_ARTICLES_DOWNLOADED));
+    renderer.drawCenteredText(UI_10_FONT_ID, y, counts.c_str(), true);
+    y += lineHeight;
+  } else {
+    renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_READWISE_NOTHING_TO_DOWNLOAD), true);
+    y += lineHeight;
+  }
+
+  if (bodiesFailed > 0) {
+    y += 6;  // a little air before the failure block
+    renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_READWISE_COULD_NOT_DOWNLOAD), true);
+    y += lineHeight;
+
+    if (!failedTitle.empty()) {
+      // Titles are up to 128 chars; keep the line inside the screen margins.
+      const int available = pageWidth - metrics.statusBarHorizontalMargin * 4;
+      std::string shown = failedTitle;
+      if (renderer.getTextWidth(UI_10_FONT_ID, shown.c_str()) > available) {
+        shown = renderer.truncatedText(UI_10_FONT_ID, shown.c_str(), available);
+      }
+      // The UI font family carries regular and bold only, so bold is what
+      // distinguishes the title from the label above it.
+      renderer.drawCenteredText(UI_10_FONT_ID, y, shown.c_str(), true, EpdFontFamily::BOLD);
+      y += lineHeight;
+    }
+
+    if (bodiesFailed > 1) {
+      const std::string more =
+          "+" + std::to_string(bodiesFailed - 1) + " " + std::string(tr(STR_READWISE_AND_MORE_FAILED));
+      renderer.drawCenteredText(UI_10_FONT_ID, y, more.c_str(), true);
+    }
+  }
+}
+
 void ReadwiseSyncActivity::render(RenderLock&&) {
   renderer.clearScreen();
   const auto pageWidth = renderer.getScreenWidth();
@@ -173,18 +244,9 @@ void ReadwiseSyncActivity::render(RenderLock&&) {
       GUI.drawPopup(renderer, progress);
       break;
     }
-    case State::COMPLETE: {
-      char summary[64];
-      if (bodiesFailed > 0) {
-        snprintf(summary, sizeof(summary), "%s (%u/%u, -%u)", tr(STR_READWISE_SYNC_COMPLETE), (unsigned)bodiesDone,
-                 (unsigned)bodiesTotal, (unsigned)bodiesFailed);
-      } else {
-        snprintf(summary, sizeof(summary), "%s (%u/%u)", tr(STR_READWISE_SYNC_COMPLETE), (unsigned)bodiesDone,
-                 (unsigned)bodiesTotal);
-      }
-      GUI.drawPopup(renderer, summary);
+    case State::COMPLETE:
+      renderComplete();
       break;
-    }
     case State::FAILED:
       GUI.drawPopup(renderer, statusMessage.c_str());
       break;

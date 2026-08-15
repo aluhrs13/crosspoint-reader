@@ -11,6 +11,16 @@
 #include "ProgressMapper.h"
 #include "activities/Activity.h"
 
+// A managed document belongs to another library (today, Readwise) rather than
+// to the SD card's book collection. It is read the same way, but it is not the
+// user's file: it has no place in Recents, its filename is an opaque ULID, and
+// the finished-book behaviours that relocate or de-list a book would all be
+// acting on something the user never put there.
+struct EpubManagedDocInfo {
+  std::string title;
+  bool managed = false;
+};
+
 class EpubReaderActivity final : public Activity {
   std::shared_ptr<Epub> epub;
   std::unique_ptr<Section> section = nullptr;
@@ -20,6 +30,7 @@ class EpubReaderActivity final : public Activity {
   // Set when navigating to a footnote href with a fragment (e.g. #note1).
   // Cleared on the next render after the new section loads and resolves it to a page.
   std::string pendingAnchor;
+  EpubManagedDocInfo managedDoc;
   int pagesUntilFullRefresh = 0;
   // Image pages use a dedicated double-FAST refresh path, so retain a manual
   // refresh request until renderContents can issue its clean base pass.
@@ -195,10 +206,11 @@ class EpubReaderActivity final : public Activity {
 
  public:
   explicit EpubReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Epub> epub,
-                              int initialRefreshCountdown)
+                              int initialRefreshCountdown, EpubManagedDocInfo managedInfo = {})
       : Activity("EpubReader", renderer, mappedInput),
         epub(std::move(epub)),
-        pagesUntilFullRefresh(initialRefreshCountdown) {}
+        pagesUntilFullRefresh(initialRefreshCountdown),
+        managedDoc(std::move(managedInfo)) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;

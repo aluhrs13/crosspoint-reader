@@ -6,7 +6,8 @@
 #include <cstring>
 #include <utility>
 
-#include "BodyTextWriter.h"
+#include "ArticleAssembler.h"
+#include "ArticleBodyWriter.h"
 
 namespace readwise {
 namespace {
@@ -56,9 +57,11 @@ std::string ReadwiseSyncEngine::indexPath(Location location) const {
   return baseDir_ + "/index_" + locationName(location) + ".bin";
 }
 
-std::string ReadwiseSyncEngine::bodyPath(const char* id) const {
-  return baseDir_ + "/bodies/" + (id != nullptr ? id : "") + ".txt";
+std::string ReadwiseSyncEngine::articleDir(const char* id) const {
+  return baseDir_ + "/bodies/" + (id != nullptr ? id : "");
 }
+
+std::string ReadwiseSyncEngine::bodyPath(const char* id) const { return articleDir(id) + "/article.epub"; }
 
 bool ReadwiseSyncEngine::loadCheckpoint(Checkpoint& out) {
   uint8_t buffer[CHECKPOINT_SIZE];
@@ -152,7 +155,14 @@ SyncOutcome ReadwiseSyncEngine::sync() {
     outcome.status = pullStatus;
     return outcome;
   }
-  outcome.pulled = static_cast<uint16_t>(staged.size());
+  // Tombstones (seen items in unread-only locations) are evictions, not
+  // pulled documents; only real records count.
+  outcome.pulled = 0;
+  for (const StagedRef& ref : staged) {
+    if (ref.length > 0) {
+      ++outcome.pulled;
+    }
+  }
 
   // --- 4. Merge and rebuild indexes --------------------------------------
   outcome.failedStage = SyncStage::RebuildingIndexes;
@@ -237,6 +247,15 @@ ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::v
         // A read document in an unread-only location is never staged, but its
         // updated_at still advances the checkpoint -- otherwise the same read
         // items would be re-walked on every sync.
+        //
+        // It still leaves a zero-length tombstone: without one, an item read
+        // on ANOTHER device is skipped here, the merge then finds no staged
+        // replacement, and the stale unseen record is carried over forever --
+        // the item never disappears from the feed.
+        StagedRef tombstone{};
+        copyBounded(tombstone.id, ID_CAP, copy.id, strlen(copy.id));
+        tombstone.length = 0;
+        staged->push_back(tombstone);
         advanceCursor(copy);
         return true;
       }
@@ -409,7 +428,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
     if ((doc.flags & FLAG_HAS_BODY) == 0) {
       return;
     }
-    store_.remove(bodyPath(doc.id));
+    store_.removeTree(articleDir(doc.id));
     doc.flags &= static_cast<uint8_t>(~FLAG_HAS_BODY);
   };
 
@@ -429,7 +448,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       drop = policy != nullptr && policy->unreadOnly && (doc.flags & FLAG_SEEN) != 0;
     }
     if (drop && (doc.flags & FLAG_HAS_BODY) != 0) {
-      store_.remove(bodyPath(doc.id));
+      store_.removeTree(articleDir(doc.id));
     }
     return drop;
   };
@@ -446,6 +465,9 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
   };
 
   for (const StagedRef& ref : staged) {
+    if (ref.length == 0) {
+      continue;  // tombstone: nothing staged; its work happens in carry-over
+    }
     if (nonFeedWritten >= documentCap_ && feedWritten >= feedCap_) {
       break;
     }
@@ -464,7 +486,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
     if (classWritten >= (isFeed ? feedCap_ : documentCap_)) {
       if (isFeed && (scratchDoc_.flags & FLAG_HAS_BODY) != 0) {
         // A feed item displaced by the cap is gone for good; reclaim its body.
-        store_.remove(bodyPath(scratchDoc_.id));
+        store_.removeTree(articleDir(scratchDoc_.id));
       }
       continue;
     }
@@ -501,14 +523,20 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       }
       readOffset += static_cast<uint32_t>(consumed);
 
-      bool superseded = false;
+      const StagedRef* superseding = nullptr;
       for (const StagedRef& ref : staged) {
         if (sameId(ref.id, scratchDoc_.id)) {
-          superseded = true;
+          superseding = &ref;
           break;
         }
       }
-      if (superseded) {
+      if (superseding != nullptr) {
+        if (superseding->length == 0) {
+          // A tombstone: the pull saw this document seen in an unread-only
+          // location and deliberately staged no replacement. The record dies
+          // here, and its body with it -- no surviving copy carries the flag.
+          store_.removeTree(articleDir(scratchDoc_.id));
+        }
         continue;
       }
       applyQueuedOverrides(scratchDoc_);
@@ -517,7 +545,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       if (classWritten >= (isFeed ? feedCap_ : documentCap_)) {
         if (isFeed && (scratchDoc_.flags & FLAG_HAS_BODY) != 0) {
           // Displaced by newer staged feed items; reclaim the body.
-          store_.remove(bodyPath(scratchDoc_.id));
+          store_.removeTree(articleDir(scratchDoc_.id));
         }
         continue;
       }
@@ -784,8 +812,17 @@ ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(co
   uint16_t done = 0;
   for (const MissingId& entry : missing) {
     ApiStatus status = ApiStatus::NetworkError;
+    // Relative image srcs resolve against source_url, and the OPF wants the
+    // title and author, so the record is re-read rather than carried through
+    // the scan (which only kept ids, to bound the missing list).
+    const bool haveDoc = findDocument(entry.id, scratchDoc_);
+    store_.ensureDir(articleDir(entry.id));
+    const std::string xhtmlPath = articleDir(entry.id) + "/.body.xhtml";
+    const std::string scratchPath = articleDir(entry.id) + "/.img.tmp";
+
     for (int attempt = 0; attempt < 1 + MAX_RATE_LIMIT_RETRIES; ++attempt) {
-      auto writer = makeUniqueNoThrow<BodyTextWriter>(store_, bodyPath(entry.id));
+      auto writer = makeUniqueNoThrow<ArticleBodyWriter>(store_, xhtmlPath, haveDoc ? scratchDoc_.sourceUrl : "",
+                                                         haveDoc ? scratchDoc_.title : "");
       if (!writer) {
         status = ApiStatus::LowMemory;
         break;
@@ -795,6 +832,23 @@ ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(co
       if (status == ApiStatus::Ok && !writer->committed()) {
         // 200 with no html_content string: nothing to retry.
         status = ApiStatus::ParseError;
+      }
+      if (status == ApiStatus::Ok) {
+        // Images are fetched here, after the body's TLS session has closed --
+        // a nested request inside the read callback is impossible, and this is
+        // also the heap's worst moment. A failure to assemble is a failure to
+        // cache; a failure to fetch any individual image is not.
+        NullArticleImageFetcher noImages;
+        ArticleImageFetcher& fetcher =
+            hooks.imageFetcher != nullptr ? *hooks.imageFetcher : static_cast<ArticleImageFetcher&>(noImages);
+        const ArticleAssemblyResult assembly =
+            assembleArticleEpub(store_, fetcher, *writer, xhtmlPath, scratchPath, bodyPath(entry.id),
+                                haveDoc ? scratchDoc_.title : "", haveDoc ? scratchDoc_.author : "");
+        if (!assembly.ok) {
+          store_.remove(xhtmlPath);
+          store_.remove(scratchPath);
+          status = ApiStatus::ParseError;
+        }
       }
       if (status != ApiStatus::RateLimited) {
         break;
@@ -820,6 +874,12 @@ ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(co
       return outcome;
     } else {
       // Skip this document; the library's on-demand path is the retry.
+      if (outcome.failed == 0) {
+        outcome.failedStatus = status;
+        if (haveDoc) {
+          copyBounded(outcome.failedTitle, TITLE_CAP, scratchDoc_.title, strlen(scratchDoc_.title));
+        }
+      }
       ++outcome.failed;
     }
     ++done;
@@ -974,7 +1034,7 @@ SyncOutcome ReadwiseSyncEngine::reconcile() {
       survivors.push_back(ref);
     } else {
       // The body cache goes with the document.
-      store_.remove(bodyPath(scratchDoc_.id));
+      store_.removeTree(articleDir(scratchDoc_.id));
       ++outcome.pulled;
     }
     readOffset += static_cast<uint32_t>(consumed);

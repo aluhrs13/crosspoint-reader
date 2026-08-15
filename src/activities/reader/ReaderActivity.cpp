@@ -11,10 +11,12 @@
 #include "Epub.h"
 #include "EpubReaderActivity.h"
 #include "SdCardFontSystem.h"
+#ifndef CROSSPOINT_READWISE_ONLY
 #include "Txt.h"
 #include "TxtReaderActivity.h"
 #include "Xtc.h"
 #include "XtcReaderActivity.h"
+#endif
 #include "activities/readwise/ReadwiseSupport.h"
 #include "activities/util/BmpViewerActivity.h"
 #include "activities/util/FullScreenMessageActivity.h"
@@ -42,7 +44,12 @@ std::unique_ptr<Epub> ReaderActivity::loadEpub(const std::string& path) {
     return nullptr;
   }
 
-  auto epub = makeUniqueNoThrow<Epub>(path, "/.crosspoint");
+  // A managed article keeps its cache inside its own directory, beside the
+  // archive, so archiving the article removes the sections, extracted images,
+  // and pixel caches in the same recursive delete. A shared /.crosspoint would
+  // leave orphaned epub_<hash> directories with no owner.
+  const std::string articleDir = ReadwiseUi::articleDirForBodyPath(path);
+  auto epub = makeUniqueNoThrow<Epub>(path, articleDir.empty() ? "/.crosspoint" : articleDir);
   if (!epub) {
     LOG_ERR("READER", "Failed to allocate EPUB object");
     return nullptr;
@@ -73,6 +80,7 @@ std::unique_ptr<Epub> ReaderActivity::loadEpub(const std::string& path) {
   return nullptr;
 }
 
+#ifndef CROSSPOINT_READWISE_ONLY
 std::unique_ptr<Xtc> ReaderActivity::loadXtc(const std::string& path) {
   if (!Storage.exists(path.c_str())) {
     LOG_ERR("READER", "File does not exist: %s", path.c_str());
@@ -110,6 +118,7 @@ std::unique_ptr<Txt> ReaderActivity::loadTxt(const std::string& path) {
   LOG_ERR("READER", "Failed to load TXT");
   return nullptr;
 }
+#endif
 
 void ReaderActivity::goToLibrary(const std::string& fromBookPath) {
   // If coming from a book, start in that book's folder; otherwise start from root
@@ -120,14 +129,23 @@ void ReaderActivity::goToLibrary(const std::string& fromBookPath) {
 void ReaderActivity::onGoToEpubReader(std::unique_ptr<Epub> epub) {
   const auto epubPath = epub->getPath();
   currentBookPath = epubPath;
-  activityManager.replaceActivity(
-      std::make_unique<EpubReaderActivity>(renderer, mappedInput, std::move(epub), initialRefreshCountdown()));
+  // A Readwise article opens managed: library-owned title, Back to the
+  // library, no recents entry. This also covers resume-after-restart, where
+  // the managed context would otherwise be lost.
+  EpubManagedDocInfo managed;
+  if (ReadwiseUi::isBodyPath(epubPath)) {
+    managed.managed = true;
+    managed.title = ReadwiseUi::titleForBodyPath(epubPath);
+  }
+  activityManager.replaceActivity(std::make_unique<EpubReaderActivity>(renderer, mappedInput, std::move(epub),
+                                                                       initialRefreshCountdown(), std::move(managed)));
 }
 
 void ReaderActivity::onGoToBmpViewer(const std::string& path) {
   activityManager.replaceActivity(std::make_unique<BmpViewerActivity>(renderer, mappedInput, path));
 }
 
+#ifndef CROSSPOINT_READWISE_ONLY
 void ReaderActivity::onGoToXtcReader(std::unique_ptr<Xtc> xtc) {
   const auto xtcPath = xtc->getPath();
   currentBookPath = xtcPath;
@@ -138,17 +156,10 @@ void ReaderActivity::onGoToXtcReader(std::unique_ptr<Xtc> xtc) {
 void ReaderActivity::onGoToTxtReader(std::unique_ptr<Txt> txt) {
   const auto txtPath = txt->getPath();
   currentBookPath = txtPath;
-  // A Readwise body opens managed: library-owned title, Back to the library,
-  // no recents entry. This also covers resume-after-restart, where the managed
-  // context would otherwise be lost.
-  TxtManagedDocInfo managed;
-  if (ReadwiseUi::isBodyPath(txtPath)) {
-    managed.managed = true;
-    managed.title = ReadwiseUi::titleForBodyPath(txtPath);
-  }
-  activityManager.replaceActivity(std::make_unique<TxtReaderActivity>(renderer, mappedInput, std::move(txt),
-                                                                      initialRefreshCountdown(), std::move(managed)));
+  activityManager.replaceActivity(
+      std::make_unique<TxtReaderActivity>(renderer, mappedInput, std::move(txt), initialRefreshCountdown()));
 }
+#endif
 
 void ReaderActivity::onEnter() {
   Activity::onEnter();
@@ -163,6 +174,7 @@ void ReaderActivity::onEnter() {
   currentBookPath = initialBookPath;
   if (isBmpFile(initialBookPath)) {
     onGoToBmpViewer(initialBookPath);
+#ifndef CROSSPOINT_READWISE_ONLY
   } else if (isXtcFile(initialBookPath)) {
     auto xtc = loadXtc(initialBookPath);
     if (!xtc) {
@@ -177,6 +189,7 @@ void ReaderActivity::onEnter() {
       return;
     }
     onGoToTxtReader(std::move(txt));
+#endif
   } else {
     auto epub = loadEpub(initialBookPath);
     if (!epub) {

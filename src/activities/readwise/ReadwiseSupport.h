@@ -13,6 +13,10 @@ namespace ReadwiseUi {
 
 // /.crosspoint/readwise/bodies/<id>.txt
 std::string bodyPathForId(const char* id);
+// The directory holding an article's archive and the Epub cache built beside
+// it. Deleting this removes every trace of the article in one call.
+std::string articleDirForId(const char* id);
+std::string articleDirForBodyPath(const std::string& path);
 
 // True when `path` is a cached Readwise body, meaning the document must be
 // opened managed (library-owned title, Back to the library, no recents entry).

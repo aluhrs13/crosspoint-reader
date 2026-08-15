@@ -32,6 +32,12 @@ class ReadwiseLibraryActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
+#ifdef CROSSPOINT_READWISE_ONLY
+  // This library is the home screen in the Readwise-only build, so the home
+  // gesture must not try to navigate to a home behind it -- that would replace
+  // this activity with another copy of itself.
+  bool isHomeActivity() const override { return true; }
+#endif
 
  private:
   enum class State : uint8_t {
@@ -47,8 +53,16 @@ class ReadwiseLibraryActivity final : public Activity {
   void openDocument(const readwise::Document& doc);
   void startDownload(const readwise::Document& doc);
   void performDownload();
-  void queueArchive(const readwise::Document& doc);
+  void migrateLegacyTextBodies();
+  static void sImageProgress(void* ctx, size_t done, size_t total);
+  void queueMove(const readwise::Document& doc, readwise::Location target);
+  // Long-pressing a location button sends the selected article there instead
+  // of switching to that view. Returns true while the button is held, so the
+  // caller swallows the frame.
+  bool handleLocationHold(MappedInputManager::Button button, int targetIndex);
   void jumpToLocation(int index);
+  // Persists locationIndex so Back out of an article returns to this view.
+  void rememberLocation();
   // Direct-jump targets for the Left/Right buttons: from Later they lead to
   // Shortlist and Feed; from Shortlist or Feed the button for the current view
   // leads back to Later. The hint labels name the destination view.
@@ -80,10 +94,19 @@ class ReadwiseLibraryActivity final : public Activity {
   std::string pendingDownloadId;
   std::string pendingDownloadTitle;
   std::string pendingDownloadRev;
+  // Relative image srcs resolve against source_url, and the OPF wants the
+  // author, so both are carried from the row rather than re-read later.
+  std::string pendingDownloadSourceUrl;
+  std::string pendingDownloadAuthor;
   bool pendingDownloadSeen = false;
   std::string statusMessage;
-  // Set when a hold has already archived, so the following Confirm release
-  // does not also open the document.
-  bool archiveTriggered = false;
+  // Set when a hold has already acted (archive, or a move to another view), so
+  // the release that follows does not also open the document or switch views.
+  bool holdActionTriggered = false;
   bool wifiActivated = false;
+  // Back is also what navigates *into* this screen (from Settings, or out of a
+  // managed article), and the button is often still held when the activity is
+  // constructed. Without this, the trailing release acts again immediately and
+  // bounces straight back out to where the user just came from.
+  bool ignoreBackUntilReleased = false;
 };

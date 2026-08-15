@@ -1,6 +1,7 @@
 #include "ReadwiseLibraryActivity.h"
 
-#include <BodyTextWriter.h>
+#include <ArticleAssembler.h>
+#include <ArticleBodyWriter.h>
 #include <GfxRenderer.h>
 #include <HttpReadwiseApi.h>
 #include <I18n.h>
@@ -9,9 +10,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iterator>
 
 #include "CrossPointState.h"
 #include "ReadwiseCredentialStore.h"
+#include "ReadwiseImageFetcher.h"
 #include "ReadwiseSupport.h"
 #include "ReadwiseSyncActivity.h"
 #include "SilentRestart.h"
@@ -23,7 +26,9 @@
 namespace {
 // Confirm held this long queues an archive instead of opening. Matches the
 // reader's GO_HOME_MS long-press feel.
-constexpr unsigned long ARCHIVE_HOLD_MS = 1000;
+// Shared by every press-and-hold action on this screen: archive (Confirm) and
+// send-to-location (Left/Right).
+constexpr unsigned long HOLD_ACTION_MS = 1000;
 // One window of metadata; sized generously past a visible page.
 constexpr int WINDOW_SIZE = 32;
 
@@ -39,6 +44,42 @@ const char* locationLabel(const readwise::Location location) {
 }
 }  // namespace
 
+// Bodies used to be plain text at bodies/<id>.txt; they are now EPUB archives
+// at bodies/<id>/article.epub. The old files no longer match any path the
+// library looks for, so without this they would sit on the card forever with
+// nothing owning them. Clearing the flag makes the next sync re-fetch the
+// article -- this time with its images.
+void ReadwiseLibraryActivity::migrateLegacyTextBodies() {
+  const std::string bodiesDir = std::string(ReadwiseCredentialStore::getDataDir()) + "/bodies";
+  HalFile dir = Storage.open(bodiesDir.c_str());
+  if (!dir || !dir.isDirectory()) {
+    return;
+  }
+
+  int migrated = 0;
+  for (auto entry = dir.openNextFile(); entry; entry = dir.openNextFile()) {
+    char name[64];
+    if (entry.isDirectory() || entry.getName(name, sizeof(name)) == 0) {
+      continue;
+    }
+    const std::string fileName(name);
+    if (fileName.size() < 5 || fileName.compare(fileName.size() - 4, 4, ".txt") != 0) {
+      continue;
+    }
+    const std::string id = fileName.substr(0, fileName.size() - 4);
+    entry.close();  // must close before removing the same path
+    if (Storage.remove((bodiesDir + "/" + fileName).c_str())) {
+      ++migrated;
+    }
+    if (engine) {
+      engine->setBodyCached(id.c_str(), false);
+    }
+  }
+  if (migrated > 0) {
+    LOG_INF("RWLIB", "Migrated %d legacy text bodies; they re-download with images", migrated);
+  }
+}
+
 void ReadwiseLibraryActivity::onEnter() {
   Activity::onEnter();
   engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(nullApi, store, ReadwiseCredentialStore::getDataDir());
@@ -51,14 +92,23 @@ void ReadwiseLibraryActivity::onEnter() {
     // left visible-state stale.
     engine->rebuildLocal();
   }
+  migrateLegacyTextBodies();
+  // Return to the view the last article was opened from rather than always
+  // Later -- including after the restart that an uncached open performs.
+  constexpr auto locationCount = static_cast<uint8_t>(std::size(LOCATIONS));
+  locationIndex =
+      APP_STATE.readwiseLocationIndex < locationCount ? static_cast<int>(APP_STATE.readwiseLocationIndex) : 0;
   selectedIndex = 0;
   state = State::LIST;
+  // Entered by a Back press that is very likely still held; see the member.
+  ignoreBackUntilReleased = mappedInput.isPressed(MappedInputManager::Button::Back);
   reloadCounts();
   requestUpdate();
 }
 
 void ReadwiseLibraryActivity::onExit() {
   Activity::onExit();
+  rememberLocation();
   window.clear();
   engine.reset();
   if (wifiActivated) {
@@ -68,6 +118,17 @@ void ReadwiseLibraryActivity::onExit() {
     // library.
     silentRestartToReadwise();
   }
+}
+
+void ReadwiseLibraryActivity::rememberLocation() {
+  // Value-change guarded: switching views with Left/Right must not rewrite
+  // state.json on every press.
+  const auto current = static_cast<uint8_t>(locationIndex);
+  if (APP_STATE.readwiseLocationIndex == current) {
+    return;
+  }
+  APP_STATE.readwiseLocationIndex = current;
+  APP_STATE.saveToFile();
 }
 
 void ReadwiseLibraryActivity::reloadCounts() {
@@ -113,6 +174,15 @@ void ReadwiseLibraryActivity::jumpToLocation(const int index) {
 }
 
 void ReadwiseLibraryActivity::loop() {
+  if (ignoreBackUntilReleased) {
+    // Skip this frame entirely so the in-flight Back release is consumed
+    // without acting on it.
+    if (!mappedInput.isPressed(MappedInputManager::Button::Back)) {
+      ignoreBackUntilReleased = false;
+    }
+    return;
+  }
+
   if (state == State::DOWNLOAD_FAILED) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Back) ||
         mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
@@ -128,7 +198,13 @@ void ReadwiseLibraryActivity::loop() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+#ifdef CROSSPOINT_READWISE_ONLY
+    // This library IS home in the Readwise-only build; Back opens Settings
+    // (whose Back returns here via the re-routed goHome()).
+    activityManager.goToSettings();
+#else
     onGoHome();
+#endif
     return;
   }
 
@@ -137,30 +213,44 @@ void ReadwiseLibraryActivity::loop() {
   // Checking held time on release instead looked equivalent but never
   // triggered in the hand.
   if (mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
-    if (!archiveTriggered && selectedIndex > 0 && mappedInput.getHeldTime() >= ARCHIVE_HOLD_MS) {
+    if (!holdActionTriggered && selectedIndex > 0 && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
       const readwise::Document* doc = docAt(selectedIndex - 1);
       if (doc != nullptr) {
-        archiveTriggered = true;  // suppress the release below
-        queueArchive(*doc);
+        holdActionTriggered = true;  // suppress the release below
+        queueMove(*doc, readwise::Location::Archive);
       }
     }
     return;
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (archiveTriggered) {
-      archiveTriggered = false;  // the hold already acted
+    if (holdActionTriggered) {
+      holdActionTriggered = false;  // the hold already acted
       return;
     }
     activateSelection();
     return;
   }
 
+  if (handleLocationHold(MappedInputManager::Button::Left, leftTargetIndex())) {
+    return;
+  }
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+    if (holdActionTriggered) {
+      holdActionTriggered = false;  // the hold already moved the article
+      return;
+    }
     jumpToLocation(leftTargetIndex());
     return;
   }
+  if (handleLocationHold(MappedInputManager::Button::Right, rightTargetIndex())) {
+    return;
+  }
   if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+    if (holdActionTriggered) {
+      holdActionTriggered = false;
+      return;
+    }
     jumpToLocation(rightTargetIndex());
     return;
   }
@@ -234,6 +324,8 @@ void ReadwiseLibraryActivity::startDownload(const readwise::Document& doc) {
   pendingDownloadId = doc.id;
   pendingDownloadTitle = doc.title;
   pendingDownloadRev = doc.updatedAt;
+  pendingDownloadSourceUrl = doc.sourceUrl;
+  pendingDownloadAuthor = doc.author;
   pendingDownloadSeen = (doc.flags & readwise::FLAG_SEEN) != 0;
   if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
     performDownload();
@@ -250,6 +342,20 @@ void ReadwiseLibraryActivity::startDownload(const readwise::Document& doc) {
                          });
 }
 
+// Images can take several seconds each on a slow connection; without this the
+// popup would sit on the title alone and read as a hang.
+void ReadwiseLibraryActivity::sImageProgress(void* ctx, size_t done, size_t total) {
+  auto* self = static_cast<ReadwiseLibraryActivity*>(ctx);
+  if (total == 0) {
+    return;
+  }
+  {
+    RenderLock lock(*self);
+    self->statusMessage = self->pendingDownloadTitle + " (" + std::to_string(done) + "/" + std::to_string(total) + ")";
+  }
+  self->requestUpdate();
+}
+
 void ReadwiseLibraryActivity::performDownload() {
   {
     RenderLock lock(*this);
@@ -260,16 +366,23 @@ void ReadwiseLibraryActivity::performDownload() {
   wifiActivated = true;
 
   const std::string bodyPath = ReadwiseUi::bodyPathForId(pendingDownloadId.c_str());
+  const std::string articleDir = ReadwiseUi::articleDirForId(pendingDownloadId.c_str());
   readwise::ApiStatus status = readwise::ApiStatus::LowMemory;
   if (!bodyPath.empty()) {
-    // Nothing else creates the bodies directory -- sync only ensures the base
+    // Nothing else creates these directories -- sync only ensures the base
     // dir -- and SdFat's open-for-write fails outright on a missing parent,
     // which aborted the very first article download as a ParseError.
     store.ensureDir(std::string(ReadwiseCredentialStore::getDataDir()) + "/bodies");
+    store.ensureDir(articleDir);
+    const std::string xhtmlPath = articleDir + "/.body.xhtml";
+    const std::string scratchPath = articleDir + "/.img.tmp";
+
     readwise::HttpReadwiseApi api(READWISE_STORE.getToken());
-    // The writer carries the extractor's output buffer (~400 bytes of state)
-    // and sits under a live TLS session -- heap, not the main-loop stack.
-    auto writer = makeUniqueNoThrow<readwise::BodyTextWriter>(store, bodyPath);
+    // The writer carries the tokenizer, the XHTML emitter, and the image URL
+    // arena (~4.6 KB) and sits under a live TLS session -- heap, not the
+    // main-loop stack.
+    auto writer = makeUniqueNoThrow<readwise::ArticleBodyWriter>(store, xhtmlPath, pendingDownloadSourceUrl.c_str(),
+                                                                 pendingDownloadTitle.c_str());
     if (!writer) {
       LOG_ERR("RWLIB", "OOM: body writer");
     } else {
@@ -279,8 +392,31 @@ void ReadwiseLibraryActivity::performDownload() {
         // A 200 whose body never arrived (document without html_content).
         status = readwise::ApiStatus::ParseError;
       }
+      if (status == readwise::ApiStatus::Ok) {
+        // Images come after the body's TLS session closes: a nested request
+        // inside the read callback is impossible, and this is the heap's worst
+        // moment. Individual image failures degrade to alt text and must not
+        // cost the article, so only assembly itself can fail the download.
+        ReadwiseUi::HttpArticleImageFetcher fetcher;
+        const readwise::ArticleAssemblyResult assembly = readwise::assembleArticleEpub(
+            store, fetcher, *writer, xhtmlPath, scratchPath, bodyPath, pendingDownloadTitle.c_str(),
+            pendingDownloadAuthor.c_str(), &sImageProgress, this);
+        if (!assembly.ok) {
+          store.remove(xhtmlPath);
+          store.remove(scratchPath);
+          status = readwise::ApiStatus::ParseError;
+        } else {
+          LOG_INF("RWLIB", "Article assembled: %u/%u images", static_cast<unsigned>(assembly.imagesStored),
+                  static_cast<unsigned>(assembly.imagesRequested));
+        }
+      }
     }
   }
+
+  // The fetch blocked the main loop for its whole duration; without this the
+  // inactivity timer is already past the timeout and the device would sleep
+  // the instant control returns, hiding the outcome.
+  activityManager.noteBlockingWorkFinished();
 
   if (status == readwise::ApiStatus::Ok) {
     // Persist the body flag in docs.bin, or the restart below would show the
@@ -294,6 +430,9 @@ void ReadwiseLibraryActivity::performDownload() {
       }
     }
     APP_STATE.openEpubPath = bodyPath;
+    // The restart below skips onExit(), so record the view here or Back out of
+    // the article would land on Later instead of the one it was opened from.
+    APP_STATE.readwiseLocationIndex = static_cast<uint8_t>(locationIndex);
     APP_STATE.saveToFile();
     // The WiFi/TLS session just fragmented the heap the reader needs; the
     // silent restart both sheds it and lands directly in the managed reader.
@@ -313,14 +452,32 @@ void ReadwiseLibraryActivity::performDownload() {
   requestUpdate();
 }
 
-void ReadwiseLibraryActivity::queueArchive(const readwise::Document& doc) {
+bool ReadwiseLibraryActivity::handleLocationHold(const MappedInputManager::Button button, const int targetIndex) {
+  if (!mappedInput.isPressed(button)) {
+    return false;
+  }
+  const readwise::Location target = LOCATIONS[targetIndex];
+  // Feed is server-side content rather than a shelf, so it is a view you can
+  // switch to but never a destination you can send an article to.
+  const bool movable = target == readwise::Location::Later || target == readwise::Location::Shortlist;
+  if (movable && !holdActionTriggered && selectedIndex > 0 && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
+    const readwise::Document* doc = docAt(selectedIndex - 1);
+    if (doc != nullptr) {
+      holdActionTriggered = true;  // suppress the release that follows
+      queueMove(*doc, target);
+    }
+  }
+  return true;  // held: swallow the frame either way
+}
+
+void ReadwiseLibraryActivity::queueMove(const readwise::Document& doc, const readwise::Location target) {
   if (engine == nullptr) {
     return;
   }
-  if (!engine->queueLocationChange(doc.id, readwise::Location::Archive, doc.updatedAt)) {
+  if (!engine->queueLocationChange(doc.id, target, doc.updatedAt)) {
     return;
   }
-  // Visible immediately: the document leaves the synced indexes now, and the
+  // Visible immediately: the document leaves the current index now, and the
   // queued op pushes at the next sync.
   engine->rebuildLocal();
   reloadCounts();

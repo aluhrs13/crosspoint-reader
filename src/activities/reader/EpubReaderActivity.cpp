@@ -20,14 +20,18 @@
 #include "BookmarkEntry.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#ifndef CROSSPOINT_READWISE_ONLY
 #include "DictionaryWordSelectActivity.h"
+#endif
 #include "EpubReaderBookmarksActivity.h"
 #include "EpubReaderChapterSelectionActivity.h"
 #include "EpubReaderFootnotesActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
 #include "KOReaderCredentialStore.h"
+#ifndef CROSSPOINT_READWISE_ONLY
 #include "KOReaderSyncActivity.h"
+#endif
 #include "MappedInputManager.h"
 #include "ProgressMapper.h"
 #include "QrDisplayActivity.h"
@@ -210,7 +214,11 @@ void EpubReaderActivity::onEnter() {
   // Save current epub as last opened epub and add to recent books
   APP_STATE.openEpubPath = epub->getPath();
   APP_STATE.saveToFile();
-  RECENT_BOOKS.addBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), epub->getThumbBmpPath());
+  if (!managedDoc.managed) {
+    // Managed documents live in their own library, not in Recents -- and their
+    // filename is an opaque ULID that would pollute the list.
+    RECENT_BOOKS.addBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), epub->getThumbBmpPath());
+  }
 
   loadCachedBookmarks();
 
@@ -260,18 +268,20 @@ void EpubReaderActivity::openReaderMenu() {
     bookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress) * 100.0f;
   }
   const int bookProgressPercent = clampPercent(static_cast<int>(bookProgress + 0.5f));
-  startActivityForResult(std::make_unique<EpubReaderMenuActivity>(
-                             renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
-                             SETTINGS.orientation, !currentPageFootnotes.empty(), !cachedBookmarks.empty()),
-                         [this](const ActivityResult& result) {
-                           // Always apply orientation change even if the menu was cancelled
-                           const auto& menu = std::get<MenuResult>(result.data);
-                           applyOrientation(menu.orientation);
-                           toggleAutoPageTurn(menu.pageTurnOption);
-                           if (!result.isCancelled) {
-                             onReaderMenuConfirm(static_cast<EpubReaderMenuActivity::MenuAction>(menu.action));
-                           }
-                         });
+  startActivityForResult(
+      std::make_unique<EpubReaderMenuActivity>(
+          renderer, mappedInput, managedDoc.managed && !managedDoc.title.empty() ? managedDoc.title : epub->getTitle(),
+          currentPage, totalPages, bookProgressPercent, SETTINGS.orientation, !currentPageFootnotes.empty(),
+          !cachedBookmarks.empty()),
+      [this](const ActivityResult& result) {
+        // Always apply orientation change even if the menu was cancelled
+        const auto& menu = std::get<MenuResult>(result.data);
+        applyOrientation(menu.orientation);
+        toggleAutoPageTurn(menu.pageTurnOption);
+        if (!result.isCancelled) {
+          onReaderMenuConfirm(static_cast<EpubReaderMenuActivity::MenuAction>(menu.action));
+        }
+      });
 }
 
 bool EpubReaderActivity::buildTickHeapGate() {
@@ -299,6 +309,10 @@ void EpubReaderActivity::showBuildPopup() {
 }
 
 void EpubReaderActivity::openDictionaryWordSelect() {
+#ifdef CROSSPOINT_READWISE_ONLY
+  // Dictionary support is compiled out of the Readwise-only build.
+  return;
+#else
   if (SETTINGS.dictionaryName[0] == '\0') {
     showDictionaryMessage = true;
     dictionaryMessageTime = millis();
@@ -319,6 +333,7 @@ void EpubReaderActivity::openDictionaryWordSelect() {
   startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(renderer, mappedInput, std::move(page),
                                                                         orientedMarginLeft, orientedMarginTop),
                          [this](const ActivityResult&) { requestUpdate(); });
+#endif
 }
 
 void EpubReaderActivity::loop() {
@@ -426,7 +441,7 @@ void EpubReaderActivity::loop() {
   // Drop this book from the Recent Books list; if the reader then pages back into the book,
   // re-add it. So removal only sticks if the reader leaves while still on the End-of-Book
   // screen. Acts only on the transition (guarded by recentsEntryRemoved) — no per-frame writes.
-  if (SETTINGS.removeReadBooksFromRecents) {
+  if (SETTINGS.removeReadBooksFromRecents && !managedDoc.managed) {
     if (atEndOfBook && !recentsEntryRemoved) {
       // Only treat the book as "removed by us" if it was actually in the list, so the
       // re-add branch below doesn't insert a book the feature never removed.
@@ -443,7 +458,11 @@ void EpubReaderActivity::loop() {
   // finished). If removeReadBooksFromRecents also fired, RecentBooksStore::updatePath in the
   // move path becomes a safe no-op since the entry was already removed.
   if (atEndOfBook) {
-    pendingReadFolderMove = SETTINGS.moveFinishedToReadFolder && !isInReadFolder(epub->getPath());
+    // Never relocate a managed article: it is not in the book collection, and
+    // moving it out of its library directory would orphan both the archive and
+    // the cache built beside it.
+    pendingReadFolderMove =
+        SETTINGS.moveFinishedToReadFolder && !managedDoc.managed && !isInReadFolder(epub->getPath());
   } else {
     pendingReadFolderMove = false;
   }
@@ -570,8 +589,17 @@ void EpubReaderActivity::loop() {
     return;
   }
 
-  if (ReaderUtils::handleBackNavigation(mappedInput, activityManager, epub ? epub->getPath().c_str() : "",
-                                        {this, [](void* ctx) { static_cast<EpubReaderActivity*>(ctx)->onGoHome(); }})) {
+  if (managedDoc.managed) {
+    // A managed document came from the Readwise library, so Back returns
+    // there; the file-browser fallback would strand the user in the bodies
+    // cache directory.
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      activityManager.goToReadwiseLibrary();
+      return;
+    }
+  } else if (ReaderUtils::handleBackNavigation(
+                 mappedInput, activityManager, epub ? epub->getPath().c_str() : "",
+                 {this, [](void* ctx) { static_cast<EpubReaderActivity*>(ctx)->onGoHome(); }})) {
     return;
   }
 
@@ -932,6 +960,10 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
 }
 
 bool EpubReaderActivity::launchKOReaderSync() {
+#ifdef CROSSPOINT_READWISE_ONLY
+  // KOReader sync is compiled out of the Readwise-only build.
+  return false;
+#else
   if (!KOREADER_STORE.hasCredentials()) return false;  // no-op: nothing to launch
 
   const int currentPage = section ? section->currentPage : nextPageNumber;
@@ -981,6 +1013,7 @@ bool EpubReaderActivity::launchKOReaderSync() {
       renderer, mappedInput, savedEpubPath, currentSpineIndex, currentPage, totalPages, std::move(localKoPos),
       std::move(localChapterName), paragraphIndex));
   return true;  // acted: launched the sync activity
+#endif
 }
 
 void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
