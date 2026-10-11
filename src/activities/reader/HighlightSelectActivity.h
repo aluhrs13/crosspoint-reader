@@ -10,7 +10,8 @@
 
 // Range selection over the current page of a managed article. Touch places the
 // start, a drag or the side keys extend it, and Confirm (or a second tap on
-// the range) queues the quote. Back and Home return to the page.
+// the range) queues the quote. Back or a short Home returns to the page;
+// long-press Home leaves to the home screen.
 class HighlightSelectActivity final : public Activity {
  public:
   HighlightSelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Page> page,

@@ -583,6 +583,13 @@ void EpubReaderActivity::loop() {
     requestUpdate();
   }
 
+  // Readwise: long-press Home always returns to the home screen, even when the
+  // configured long-press action is Reader Menu / Bookmark / etc.
+  if (readwiseArticle && mappedInput.wasHomeKeyLongPressed()) {
+    onGoHome();
+    return;
+  }
+
   // The toolbar reader menu owns all input while shown, ahead of the automatic page turn
   // below: the More panel's rate popup switches automatic turning on and leaves the panel
   // open, so the timer must neither flip the page under it nor eat the panel's next
@@ -1350,8 +1357,14 @@ void EpubReaderActivity::onReturnFromEndOfBook() {
 }
 
 bool EpubReaderActivity::handleHomeGesture() {
-  if (!readwiseArticle || !isAtEndOfBook()) return false;
-  activityManager.goToReadwiseLibrary();
+  if (!readwiseArticle) return false;
+  // Long-press Home leaves the article; a short Home opens the reader menu.
+  if (mappedInput.wasHomeKeyLongPressed()) return false;
+  if (usesToolbarMenu() && section) {
+    openOverlay(Overlay::Toolbar);
+  } else {
+    openReaderMenu();
+  }
   return true;
 }
 

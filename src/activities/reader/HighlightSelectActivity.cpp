@@ -204,11 +204,16 @@ void HighlightSelectActivity::commit() {
 }
 
 bool HighlightSelectActivity::handleHomeGesture() {
+  if (mappedInput.wasHomeKeyLongPressed()) return false;
   if (!popup) finish();
   return true;
 }
 
 void HighlightSelectActivity::loop() {
+  if (mappedInput.wasHomeKeyLongPressed()) {
+    onGoHome();
+    return;
+  }
   if (popup) {
     if (millis() - popupTime >= POPUP_MS) finish();
     return;

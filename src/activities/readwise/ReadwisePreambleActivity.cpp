@@ -125,6 +125,12 @@ void ReadwisePreambleActivity::confirmOpen() {
 void ReadwisePreambleActivity::cancel() { finish(); }
 
 bool ReadwisePreambleActivity::handleCustomInput() {
+  // When long-press is bound to something other than Home, ActivityManager does
+  // not see a home gesture — still leave on a physical long-press.
+  if (mappedInput.wasHomeKeyLongPressed()) {
+    onGoHome();
+    return true;
+  }
   if (swallowConfirmRelease) {
     const bool released = mappedInput.wasReleased(MappedInputManager::Button::Confirm);
     const bool held = mappedInput.isPressed(MappedInputManager::Button::Confirm);
@@ -149,6 +155,10 @@ bool ReadwisePreambleActivity::handleCustomInput() {
 
 bool ReadwisePreambleActivity::handleHomeGesture() {
   if (!loaded) {
+    return false;
+  }
+  // Long-press Home leaves Readwise; a short Home opens the entry menu.
+  if (mappedInput.wasHomeKeyLongPressed()) {
     return false;
   }
   if (!optionPopup.isActive()) {

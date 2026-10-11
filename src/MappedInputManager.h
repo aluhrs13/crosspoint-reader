@@ -93,6 +93,9 @@ class MappedInputManager {
   // is intentionally unused. Other boards retain the bottom-edge Home gesture.
   // The reader menu remains on its existing top-edge gesture and middle tap.
   bool wasHomeGesture() const;
+  // Raw Home-key long-press edge for this frame (independent of the configured
+  // HomeButtonAction). False on boards without a Home key.
+  bool wasHomeKeyLongPressed() const;
   // Configured one-frame action, independent of the gesture that triggered it.
   HomeButtonAction homeButtonAction() const { return homeAction; }
   void resetHomeButtonInput() const {

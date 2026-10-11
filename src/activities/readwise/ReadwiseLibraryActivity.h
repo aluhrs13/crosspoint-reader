@@ -35,6 +35,7 @@ class ReadwiseLibraryActivity final : public UiTabListActivity {
   void onEnter() override;
   void onExit() override;
   void render(RenderLock&&) override;
+  bool handleHomeGesture() override;
 #ifdef CROSSPOINT_READWISE_ONLY
   // This library is the home screen in the Readwise-only build, so the home
   // gesture must not try to navigate to a home behind it -- that would replace

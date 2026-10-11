@@ -306,7 +306,30 @@ void ReadwiseLibraryActivity::stepTab(const int direction) {
   selectTab(next);
 }
 
+bool ReadwiseLibraryActivity::handleHomeGesture() {
+  // Long-press Home leaves Readwise; a short Home opens the selected entry's menu.
+  if (mappedInput.wasHomeKeyLongPressed()) {
+    return false;
+  }
+  const int row = selectedRow();
+  if (row > 0 && !optionPopup.isActive()) {
+    showEntryMenu(row);
+    return true;
+  }
+  return false;
+}
+
 bool ReadwiseLibraryActivity::handleCustomInput() {
+  // When long-press is bound to something other than Home, ActivityManager does
+  // not see a home gesture — still leave on a physical long-press.
+  if (mappedInput.wasHomeKeyLongPressed()) {
+#ifdef CROSSPOINT_READWISE_ONLY
+    // This screen is already home; ignore so we do not replace ourselves.
+#else
+    onGoHome();
+#endif
+    return true;
+  }
   // The release that opened the menu is still in this press. Swallow it so
   // the popup does not treat it as Confirm on Archive.
   if (swallowConfirmRelease) {
