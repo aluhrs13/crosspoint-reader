@@ -17,6 +17,9 @@ class HomeActivity final : public Activity {
   bool recentsLoading = false;
   bool recentsLoaded = false;
   bool firstRenderDone = false;
+  // Paint a Loading popup over the menu: the Readwise library reads and
+  // rebuilds its SD indexes in onEnter, which blocks before its first frame.
+  bool openingReadwise = false;
   bool hasOpdsServers = false;
   bool hasPlugins = false;
   bool hasReadwise = false;

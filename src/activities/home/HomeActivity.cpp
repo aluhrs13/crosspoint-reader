@@ -467,6 +467,11 @@ void HomeActivity::loop() {
 }
 
 void HomeActivity::render(RenderLock&&) {
+  if (openingReadwise) {
+    // Over the last menu frame, which is still in the framebuffer.
+    GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+    return;
+  }
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
@@ -586,4 +591,11 @@ void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
 
 void HomeActivity::onPluginsOpen() { activityManager.goToPlugins(hasOpdsServers); }
 
-void HomeActivity::onReadwiseOpen() { activityManager.goToReadwiseLibrary(); }
+void HomeActivity::onReadwiseOpen() {
+  {
+    RenderLock lock(*this);
+    openingReadwise = true;
+  }
+  requestUpdateAndWait();
+  activityManager.goToReadwiseLibrary();
+}

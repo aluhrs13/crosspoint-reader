@@ -108,9 +108,12 @@ bool buildHighlightBody(const char* text, const char* title, const char* author,
   if (!first && !appendRaw(out, outCap, pos, ",", 1)) {
     return false;
   }
+  // note holds an inline tag (".x4pro"); Readwise turns it into #x4pro.
   if (!appendRaw(out, outCap, pos, "\"source_type\":\"", 15) ||
       !appendRaw(out, outCap, pos, HIGHLIGHT_SOURCE_TYPE, strlen(HIGHLIGHT_SOURCE_TYPE)) ||
-      !appendRaw(out, outCap, pos, "\",\"category\":\"articles\"}]}", 26)) {
+      !appendRaw(out, outCap, pos, "\",\"category\":\"articles\",\"note\":\".", 33) ||
+      !appendRaw(out, outCap, pos, HIGHLIGHT_INLINE_TAG, strlen(HIGHLIGHT_INLINE_TAG)) ||
+      !appendRaw(out, outCap, pos, "\"}]}", 4)) {
     return false;
   }
   if (pos >= outCap) {

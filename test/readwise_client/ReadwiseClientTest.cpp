@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -139,18 +140,24 @@ TEST(ReadwiseHighlight, BodyEscapesAndNamesTheSource) {
   char body[512];
   ASSERT_TRUE(buildHighlightBody("say \"hello\"\n", "How to Do What You Love", "Paul Graham",
                                  "http://www.paulgraham.com/love.html", body, sizeof(body)));
-  EXPECT_STREQ(body,
-               "{\"highlights\":[{\"text\":\"say \\\"hello\\\"\\n\",\"title\":\"How to Do What You Love\","
-               "\"author\":\"Paul Graham\",\"source_url\":\"http://www.paulgraham.com/love.html\","
-               "\"source_type\":\"crosspoint\",\"category\":\"articles\"}]}");
+  char expected[512];
+  snprintf(expected, sizeof(expected),
+           "{\"highlights\":[{\"text\":\"say \\\"hello\\\"\\n\",\"title\":\"How to Do What You Love\","
+           "\"author\":\"Paul Graham\",\"source_url\":\"http://www.paulgraham.com/love.html\","
+           "\"source_type\":\"crosspoint\",\"category\":\"articles\",\"note\":\".%s\"}]}",
+           HIGHLIGHT_INLINE_TAG);
+  EXPECT_STREQ(body, expected);
 }
 
 TEST(ReadwiseHighlight, BodyOmitsEmptyMetadata) {
   char body[256];
   ASSERT_TRUE(buildHighlightBody("Just the quote", "", nullptr, "", body, sizeof(body)));
-  EXPECT_STREQ(body,
-               "{\"highlights\":[{\"text\":\"Just the quote\",\"source_type\":\"crosspoint\","
-               "\"category\":\"articles\"}]}");
+  char expected[256];
+  snprintf(expected, sizeof(expected),
+           "{\"highlights\":[{\"text\":\"Just the quote\",\"source_type\":\"crosspoint\","
+           "\"category\":\"articles\",\"note\":\".%s\"}]}",
+           HIGHLIGHT_INLINE_TAG);
+  EXPECT_STREQ(body, expected);
 }
 
 TEST(ReadwiseHighlight, FitCutsOnAWordBoundary) {
