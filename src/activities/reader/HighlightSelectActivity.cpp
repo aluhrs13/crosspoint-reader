@@ -11,14 +11,15 @@
 #include <ReadwiseSyncEngine.h>
 #include <SdReadwiseFileStore.h>
 
-#include <cctype>
 #include <climits>
 #include <cstdlib>
 #include <cstring>
 
 #include "CrossPointSettings.h"
 #include "HapticFeedback.h"
+#include "HighlightWords.h"
 #include "ReadwiseCredentialStore.h"
+#include "activities/ActivityResult.h"
 #include "components/UITheme.h"
 
 namespace {
@@ -26,20 +27,6 @@ namespace {
 constexpr unsigned long POPUP_MS = 900;
 constexpr unsigned long REPEAT_START_MS = 500;
 constexpr unsigned long REPEAT_INTERVAL_MS = 500;
-
-bool isSelectableToken(const char* text) {
-  for (const uint8_t* p = reinterpret_cast<const uint8_t*>(text); *p != 0; p++) {
-    if (*p < 0x80) {
-      if (std::isalnum(*p)) return true;
-    } else if (*p == 0xE2 && (p[1] == 0x80 || p[1] == 0x81)) {
-      if (p[2] == 0) break;
-      p += 2;
-    } else {
-      return true;
-    }
-  }
-  return false;
-}
 
 }  // namespace
 
@@ -56,6 +43,10 @@ HighlightSelectActivity::HighlightSelectActivity(GfxRenderer& renderer, MappedIn
 
 void HighlightSelectActivity::onEnter() {
   Activity::onEnter();
+  // Back and Home leave this cancelled. A saved quote replaces it before finish().
+  ActivityResult cancelled;
+  cancelled.isCancelled = true;
+  setResult(std::move(cancelled));
   fontId = SETTINGS.getReaderFontId();
   lineHeight = renderer.getLineHeight(fontId);
   extractWords();
@@ -199,11 +190,15 @@ void HighlightSelectActivity::commit() {
   readwise::NullReadwiseApi nullApi;
   readwise::SdReadwiseFileStore store;
   auto engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(nullApi, store, ReadwiseCredentialStore::getDataDir());
-  popupOk = engine && engine->appendHighlight(documentId, quote.get());
-  if (!popupOk) {
-    LOG_ERR("HL", "Could not queue highlight for %s", documentId);
+  if (engine && engine->appendHighlight(documentId, quote.get())) {
+    ActivityResult saved;
+    setResult(std::move(saved));
+    finish();
+    return;
   }
+  LOG_ERR("HL", "Could not queue highlight for %s", documentId);
   popup = true;
+  popupOk = false;
   popupTime = millis();
   requestUpdate();
 }
@@ -292,9 +287,8 @@ void HighlightSelectActivity::render(RenderLock&&) {
   }
 
   if (!mappedInput.hasTouch()) {
-    const auto labels =
-        mappedInput.mapDirectionalLabels(tr(STR_BACK), tr(STR_READWISE_HIGHLIGHT), tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT),
-                                         tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    const auto labels = mappedInput.mapDirectionalLabels(tr(STR_BACK), tr(STR_READWISE_HIGHLIGHT), tr(STR_DIR_LEFT),
+                                                         tr(STR_DIR_RIGHT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }
 

@@ -2,7 +2,7 @@ name: CI (build)
 
 on:
   push:
-    branches: [master]
+    branches: [master, readwise-x4pro]
   pull_request:
 
 permissions:
@@ -92,6 +92,8 @@ jobs:
             asset: firmware-sticky.bin
           - env: x4pro
             asset: firmware-x4pro.bin
+          - env: x4pro-readwise
+            asset: firmware-x4pro-readwise.bin
           - env: x4c
             asset: firmware-x4c.bin
           - env: papermono

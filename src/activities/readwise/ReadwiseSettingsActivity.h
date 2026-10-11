@@ -20,7 +20,6 @@ class ReadwiseSettingsActivity final : public UiListActivity {
   void onExit() override;
 
  private:
-
   int listCount() const override { return MENU_COUNT; }
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;

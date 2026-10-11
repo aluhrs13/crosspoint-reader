@@ -206,11 +206,19 @@ class FakeApi : public readwise::ReadwiseApi {
   };
   std::vector<PostedHighlight> highlights;
   bool failHighlights = false;
+  // The next N pushHighlight calls return rejectStatus and are not stored.
+  // A 4xx must not be retried; NetworkError (failHighlights) still is.
+  int rejectHighlightCount = 0;
+  readwise::ApiStatus rejectStatus = readwise::ApiStatus::Rejected;
 
   readwise::ApiStatus pushHighlight(const char* text, const char* title, const char* author,
                                     const char* sourceUrl) override {
     if (failHighlights) {
       return readwise::ApiStatus::NetworkError;
+    }
+    if (rejectHighlightCount > 0) {
+      --rejectHighlightCount;
+      return rejectStatus;
     }
     highlights.push_back({text != nullptr ? text : "", title != nullptr ? title : "", author != nullptr ? author : "",
                           sourceUrl != nullptr ? sourceUrl : ""});

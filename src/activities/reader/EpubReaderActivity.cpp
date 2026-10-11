@@ -13,6 +13,7 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <NullReadwiseApi.h>
+#include <ReadwiseHighlight.h>
 #include <ReadwiseSyncEngine.h>
 #include <SdReadwiseFileStore.h>
 #include <TrustedTime.h>
@@ -35,9 +36,10 @@
 #include "EpubReaderBookmarksActivity.h"
 #include "EpubReaderChapterSelectionActivity.h"
 #include "EpubReaderFootnoteSelectActivity.h"
-#include "HighlightSelectActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
+#include "HighlightSelectActivity.h"
+#include "HighlightWords.h"
 #include "KOReaderCredentialStore.h"
 #ifndef CROSSPOINT_READWISE_ONLY
 #include "KOReaderSyncActivity.h"
@@ -395,7 +397,13 @@ void EpubReaderActivity::openHighlightSelect() {
 
   startActivityForResult(std::make_unique<HighlightSelectActivity>(renderer, mappedInput, std::move(page),
                                                                    orientedMarginLeft, orientedMarginTop, id.c_str()),
-                         [this](const ActivityResult&) { requestUpdate(); });
+                         [this](const ActivityResult& result) {
+                           if (!result.isCancelled) {
+                             showHighlightMessage = true;
+                             highlightMessageTime = millis();
+                           }
+                           requestUpdate();
+                         });
 }
 
 void EpubReaderActivity::openFootnoteSelect(const bool reopenMenuOnCancel) {
@@ -562,6 +570,11 @@ void EpubReaderActivity::loop() {
 
   if (showBookmarkMessage && (millis() - bookmarkMessageTime) >= ReaderUtils::BOOKMARK_MESSAGE_DURATION_MS) {
     showBookmarkMessage = false;
+    requestUpdate();
+  }
+
+  if (showHighlightMessage && (millis() - highlightMessageTime) >= ReaderUtils::BOOKMARK_MESSAGE_DURATION_MS) {
+    showHighlightMessage = false;
     requestUpdate();
   }
 
@@ -1394,8 +1407,7 @@ void EpubReaderActivity::onReadwiseEndMenu(const int selected) {
       break;
     case ReadwiseUi::ReadwiseEntryAction::Delete: {
       const std::string heading = std::string(tr(STR_DELETE)) + "? ";
-      auto confirmation =
-          makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, heading, readwiseEndTitle);
+      auto confirmation = makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, heading, readwiseEndTitle);
       if (!confirmation) {
         LOG_ERR("ERS", "OOM: readwise delete confirmation");
         showReadwiseEndMenu();
@@ -1423,8 +1435,10 @@ void EpubReaderActivity::startReadwiseEndComment(const bool returnToEndMenu) {
   auto existing = makeUniqueNoThrow<char[]>(readwise::ReadwiseSyncEngine::NOTE_CAP);
   if (!existing) {
     LOG_ERR("ERS", "OOM: readwise note");
-    if (returnToEndMenu) showReadwiseEndMenu();
-    else reopenMorePanel();
+    if (returnToEndMenu)
+      showReadwiseEndMenu();
+    else
+      reopenMorePanel();
     return;
   }
   existing[0] = '\0';
@@ -1434,13 +1448,14 @@ void EpubReaderActivity::startReadwiseEndComment(const bool returnToEndMenu) {
     auto engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(api, store, ReadwiseCredentialStore::getDataDir());
     if (engine) engine->readNote(readwiseEndId, existing.get(), readwise::ReadwiseSyncEngine::NOTE_CAP);
   }
-  auto keyboard =
-      makeUniqueNoThrow<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_READWISE_COMMENT), existing.get(),
-                                               readwise::ReadwiseSyncEngine::NOTE_CAP - 1);
+  auto keyboard = makeUniqueNoThrow<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_READWISE_COMMENT),
+                                                           existing.get(), readwise::ReadwiseSyncEngine::NOTE_CAP - 1);
   if (!keyboard) {
     LOG_ERR("ERS", "OOM: readwise comment keyboard");
-    if (returnToEndMenu) showReadwiseEndMenu();
-    else reopenMorePanel();
+    if (returnToEndMenu)
+      showReadwiseEndMenu();
+    else
+      reopenMorePanel();
     return;
   }
   startActivityForResult(std::move(keyboard), [this, returnToEndMenu](const ActivityResult& result) {
@@ -1456,8 +1471,10 @@ void EpubReaderActivity::startReadwiseEndComment(const bool returnToEndMenu) {
         }
       }
     }
-    if (returnToEndMenu) showReadwiseEndMenu();
-    else reopenMorePanel();
+    if (returnToEndMenu)
+      showReadwiseEndMenu();
+    else
+      reopenMorePanel();
     requestUpdate();
   });
 }
@@ -1861,7 +1878,9 @@ void EpubReaderActivity::renderBook() {
     ScreenshotUtil::takeScreenshot(renderer);
   }
 
-  if (showBookmarkMessage) {
+  if (showHighlightMessage) {
+    GUI.drawPopup(renderer, tr(STR_READWISE_CLIP_QUEUED));
+  } else if (showBookmarkMessage) {
     GUI.drawPopup(renderer, bookmarkRemoved ? tr(STR_BOOKMARK_REMOVED) : tr(STR_BOOKMARK_ADDED));
   }
 
@@ -1949,6 +1968,211 @@ void EpubReaderActivity::rememberCurrentContentOffset() {
   }
 }
 
+const char* EpubReaderActivity::highlightDocumentId() {
+  if (highlightDocId[0] != '\0') {
+    return highlightDocId;
+  }
+  if (readwiseEndId[0] == '\0') {
+    ensureReadwiseIdentity();
+  }
+  if (readwiseEndId[0] != '\0') {
+    readwise::copyBounded(highlightDocId, sizeof(highlightDocId), readwiseEndId, strlen(readwiseEndId));
+    return highlightDocId;
+  }
+  // The article can stay open after its docs.bin row is gone. The path still
+  // carries the id, and the quote file is keyed by that id.
+  const std::string fromPath = ReadwiseUi::idFromBodyPath(bookPath);
+  readwise::copyBounded(highlightDocId, sizeof(highlightDocId), fromPath.c_str(), fromPath.size());
+  return highlightDocId;
+}
+
+void EpubReaderActivity::ensureHighlightMarks(const Page& page, const int fontId, const int marginLeft,
+                                              const int marginTop) {
+  if (!readwiseArticle) {
+    highlightSegmentCount = 0;
+    return;
+  }
+  // Rebuilt once per page paint. drawHighlightMarks() reuses these segments
+  // for every grayscale strip, so the strips do not read the quote file.
+  highlightSegmentCount = 0;
+
+  const char* id = highlightDocumentId();
+  if (!readwise::isValidDocumentId(id)) {
+    return;
+  }
+
+  // Quotes plus per-word geometry are several kilobytes. The render task stack
+  // cannot hold them, and they are released before the grayscale planes allocate.
+  auto stored = makeUniqueNoThrow<readwise::ReadwiseSyncEngine::StoredHighlight[]>(readwise::HIGHLIGHT_MAX_PER_DOC);
+  if (!stored) {
+    LOG_ERR("ERS", "OOM: highlight quotes");
+    return;
+  }
+  int quoteCount = 0;
+  {
+    readwise::NullReadwiseApi api;
+    readwise::SdReadwiseFileStore store;
+    auto engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(api, store, ReadwiseCredentialStore::getDataDir());
+    if (!engine) {
+      LOG_ERR("ERS", "OOM: highlight reader");
+      return;
+    }
+    quoteCount = engine->readHighlights(id, stored.get(), readwise::HIGHLIGHT_MAX_PER_DOC);
+  }
+  if (quoteCount <= 0) {
+    return;
+  }
+
+  constexpr uint16_t kWordCap = 384;
+  uint16_t wordCount = 0;
+  bool capped = false;
+  for (const auto& element : page.elements) {
+    if (element->getTag() != TAG_PageLine) {
+      continue;
+    }
+    const auto* line = static_cast<const PageLine*>(element.get());
+    const auto* block = line->getBlock();
+    if (block == nullptr || !block->valid()) {
+      continue;
+    }
+    for (uint16_t i = 0; i < block->wordCount(); ++i) {
+      if (!isSelectableToken(block->wordText(i))) {
+        continue;
+      }
+      if (wordCount >= kWordCap) {
+        capped = true;
+        break;
+      }
+      ++wordCount;
+    }
+    if (capped) {
+      break;
+    }
+  }
+  if (wordCount == 0) {
+    return;
+  }
+  if (capped) {
+    LOG_DBG("ERS", "Highlight marks stopped at %u words", static_cast<unsigned>(kWordCap));
+  }
+
+  auto views = makeUniqueNoThrow<readwise::HighlightWordView[]>(wordCount);
+  auto marks = makeUniqueNoThrow<uint8_t[]>(wordCount);
+  struct Geom {
+    int16_t x;
+    int16_t y;
+    int16_t width;
+  };
+  auto geoms = makeUniqueNoThrow<Geom[]>(wordCount);
+  if (!views || !marks || !geoms) {
+    LOG_ERR("ERS", "OOM: highlight marks (%u words)", static_cast<unsigned>(wordCount));
+    return;
+  }
+
+  const int ascender = renderer.getFontAscenderSize(fontId);
+  uint16_t filled = 0;
+  for (const auto& element : page.elements) {
+    if (filled >= wordCount || element->getTag() != TAG_PageLine) {
+      continue;
+    }
+    const auto* line = static_cast<const PageLine*>(element.get());
+    const auto* block = line->getBlock();
+    if (block == nullptr || !block->valid()) {
+      continue;
+    }
+    const int8_t tracking = block->getBlockStyle().characterSpacing;
+    const int rubyShift = block->getRubyShift(ascender);
+    for (uint16_t i = 0; i < block->wordCount() && filled < wordCount; ++i) {
+      const char* text = block->wordText(i);
+      if (!isSelectableToken(text)) {
+        continue;
+      }
+      const auto style = block->wordStyle(i);
+      int wordY = line->yPos + marginTop + rubyShift;
+      if ((style & EpdFontFamily::SUP) != 0) {
+        wordY -= ascender * 2 / 5;
+      } else if ((style & EpdFontFamily::SUB) != 0) {
+        wordY += ascender / 4;
+      }
+      const int advance = renderer.getTextAdvanceX(fontId, text, style, tracking);
+      views[filled].text = text;
+      views[filled].length = block->wordTextLen(i);
+      geoms[filled].x = static_cast<int16_t>(line->xPos + block->wordXpos(i) + marginLeft);
+      geoms[filled].y = static_cast<int16_t>(wordY + ascender + 2);
+      geoms[filled].width = static_cast<int16_t>(advance > 0 ? advance : 0);
+      ++filled;
+    }
+  }
+
+  const char* quoteText[readwise::HIGHLIGHT_MAX_PER_DOC];
+  uint8_t quoteFlags[readwise::HIGHLIGHT_MAX_PER_DOC];
+  for (int q = 0; q < quoteCount; ++q) {
+    quoteText[q] = stored[q].text;
+    quoteFlags[q] = stored[q].flags;
+  }
+  readwise::markHighlightWords(views.get(), filled, quoteText, quoteFlags, static_cast<uint16_t>(quoteCount),
+                               marks.get());
+
+  constexpr int kJoinGap = 12;
+  bool open = false;
+  int16_t segX = 0;
+  int16_t segY = 0;
+  int16_t segW = 0;
+  uint8_t segPosted = 0;
+  const auto flush = [&]() {
+    if (!open || segW <= 0 || highlightSegmentCount >= HIGHLIGHT_SEGMENT_MAX) {
+      open = false;
+      return;
+    }
+    auto& seg = highlightSegments[highlightSegmentCount++];
+    seg.x = segX;
+    seg.y = segY;
+    seg.width = segW;
+    seg.posted = segPosted;
+    open = false;
+  };
+  for (uint16_t i = 0; i < filled; ++i) {
+    const uint8_t mark = marks[i];
+    if (mark == static_cast<uint8_t>(readwise::HighlightMark::None) || geoms[i].width <= 0) {
+      continue;
+    }
+    const uint8_t posted = mark == static_cast<uint8_t>(readwise::HighlightMark::Posted) ? 1 : 0;
+    const int start = geoms[i].x;
+    const int end = start + geoms[i].width;
+    if (open && posted == segPosted && geoms[i].y == segY && start <= segX + segW + kJoinGap) {
+      if (end > segX + segW) {
+        segW = static_cast<int16_t>(end - segX);
+      }
+      continue;
+    }
+    flush();
+    segX = geoms[i].x;
+    segY = geoms[i].y;
+    segW = geoms[i].width;
+    segPosted = posted;
+    open = true;
+  }
+  flush();
+}
+
+void EpubReaderActivity::drawHighlightMarks() const {
+  for (uint8_t i = 0; i < highlightSegmentCount; ++i) {
+    const HighlightSegment& seg = highlightSegments[i];
+    if (seg.width <= 0) {
+      continue;
+    }
+    const int x2 = seg.x + seg.width - 1;
+    if (seg.posted != 0) {
+      renderer.drawLine(seg.x, seg.y, x2, seg.y, 2, true);
+      continue;
+    }
+    for (int x = seg.x; x <= x2; x += 4) {
+      const int dashEnd = x + 1 <= x2 ? x + 1 : x2;
+      renderer.drawLine(x, seg.y, dashEnd, seg.y, 2, true);
+    }
+  }
+}
+
 void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int orientedMarginTop,
                                         const int orientedMarginRight, const int orientedMarginBottom,
                                         const int orientedMarginLeft) {
@@ -1997,6 +2221,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       page->renderImages(renderer, fontId, orientedMarginLeft, orientedMarginTop);
     }
     if (absoluteImageGrayscale) renderStatusBar();
+    drawHighlightMarks();
   };
 
   if (pageHasImagesNeedingDecode) {
@@ -2008,6 +2233,8 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
 
   page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
   renderStatusBar();
+  ensureHighlightMarks(*page, fontId, orientedMarginLeft, orientedMarginTop);
+  drawHighlightMarks();
   const auto tBwRender = millis();
 
   if (absoluteImageGrayscale) {
@@ -2836,7 +3063,7 @@ void EpubReaderActivity::applyReaderTextSettings() {
 void EpubReaderActivity::buildMoreActions() {
   using MA = EpubReaderMenuActivity::MenuAction;
   EpubReaderMenuActivity::buildMenuItems(moreItems, !currentPageFootnotes.empty(), !cachedBookmarks.empty(),
-                                        ReadwiseUi::isBodyPath(bookPath));
+                                         ReadwiseUi::isBodyPath(bookPath));
   moreItems.erase(std::remove_if(moreItems.begin(), moreItems.end(),
                                  [](const auto& item) {
                                    return item.action == MA::SELECT_CHAPTER || item.action == MA::TEXT_SETTINGS;

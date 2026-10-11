@@ -134,6 +134,10 @@ void ReadwiseSyncActivity::performSync() {
       state = State::DOWNLOADING_BODIES;
       pushed = outcome.pushed;
       pulled = outcome.pulled;
+      highlightsSent = outcome.highlightsSent;
+      highlightsFailed = outcome.highlightsFailed;
+      readwise::copyBounded(highlightDetail, sizeof(highlightDetail), outcome.highlightDetail,
+                            strlen(outcome.highlightDetail));
     }
     requestUpdateAndWait();
 
@@ -217,6 +221,10 @@ void ReadwiseSyncActivity::performSync() {
     statusMessage = outcome.status == readwise::ApiStatus::Ok ? tr(STR_READWISE_SYNC_FAILED)
                                                               : I18N.get(ReadwiseUi::statusStrId(outcome.status));
     readwise::copyBounded(failureDetail, sizeof(failureDetail), outcome.detail, strlen(outcome.detail));
+    highlightsSent = outcome.highlightsSent;
+    highlightsFailed = outcome.highlightsFailed;
+    readwise::copyBounded(highlightDetail, sizeof(highlightDetail), outcome.highlightDetail,
+                          strlen(outcome.highlightDetail));
     LOG_ERR("RWSYNC", "Sync failed: stage=%u status=%s detail=%s", static_cast<unsigned>(outcome.failedStage),
             readwise::apiStatusName(outcome.status), failureDetail);
   }
@@ -243,8 +251,7 @@ bool ReadwiseSyncActivity::promptDropMissing(const char* id, const char* title, 
   int choice = -1;
   // Continue is the default: a missing document should not end the sync, and
   // Confirm on a button device takes the highlighted option.
-  skipPopup.showMessage(tr(STR_READWISE_NOT_ON_SERVER), skipMessage, options, 2, 1,
-                        [&](int index) { choice = index; });
+  skipPopup.showMessage(tr(STR_READWISE_NOT_ON_SERVER), skipMessage, options, 2, 1, [&](int index) { choice = index; });
 
   {
     RenderLock lock(*this);
@@ -300,7 +307,12 @@ void ReadwiseSyncActivity::renderComplete() const {
   const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID) + 6;
 
   // Centre the block: a clean sync is 2 lines, a sync with failures is 4 or 5.
+  const bool showSent = highlightsSent > 0;
+  const bool showFailed = highlightsFailed > 0;
   int lines = bodiesTotal > 0 ? 2 : 1;
+  if (showSent) lines++;
+  if (showFailed) lines++;
+  if (showFailed && highlightDetail[0] != '\0') lines++;
   if (bodiesFailed > 0) {
     lines += failedTitle.empty() ? 1 : 2;
     if (bodiesFailed > 1) lines++;
@@ -309,6 +321,33 @@ void ReadwiseSyncActivity::renderComplete() const {
 
   renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_READWISE_SYNC_COMPLETE), true, EpdFontFamily::BOLD);
   y += lineHeight;
+
+  if (showSent || showFailed) {
+    char line[80];
+    if (showSent) {
+      snprintf(line, sizeof(line), "%u %s", static_cast<unsigned>(highlightsSent),
+               highlightsSent == 1 ? tr(STR_READWISE_HIGHLIGHT_SENT) : tr(STR_READWISE_HIGHLIGHTS_SENT));
+      renderer.drawCenteredText(UI_10_FONT_ID, y, line, true);
+      y += lineHeight;
+    }
+    if (showFailed) {
+      snprintf(line, sizeof(line), "%u %s", static_cast<unsigned>(highlightsFailed),
+               highlightsFailed == 1 ? tr(STR_READWISE_HIGHLIGHT_FAILED) : tr(STR_READWISE_HIGHLIGHTS_FAILED));
+      renderer.drawCenteredText(UI_10_FONT_ID, y, line, true);
+      y += lineHeight;
+    }
+    if (showFailed && highlightDetail[0] != '\0') {
+      const int available = pageWidth - metrics.statusBarHorizontalMargin * 4;
+      const char* shown = highlightDetail;
+      std::string truncated;
+      if (available > 0 && renderer.getTextWidth(UI_10_FONT_ID, highlightDetail) > available) {
+        truncated = renderer.truncatedText(UI_10_FONT_ID, highlightDetail, available);
+        shown = truncated.c_str();
+      }
+      renderer.drawCenteredText(UI_10_FONT_ID, y, shown, true);
+      y += lineHeight;
+    }
+  }
 
   if (bodiesTotal > 0) {
     const std::string counts = std::to_string(bodiesDone) + "/" + std::to_string(bodiesTotal) + " " +
@@ -386,10 +425,10 @@ void ReadwiseSyncActivity::renderDownloading() const {
     renderer.drawCenteredText(UI_10_FONT_ID, y, counts, true);
     y += lineHeight + gap;
 
-    GUI.drawProgressBar(renderer,
-                        Rect{metrics.contentSidePadding, y, pageWidth - metrics.contentSidePadding * 2,
-                             metrics.progressBarHeight},
-                        bodiesDone, bodiesTotal);
+    GUI.drawProgressBar(
+        renderer,
+        Rect{metrics.contentSidePadding, y, pageWidth - metrics.contentSidePadding * 2, metrics.progressBarHeight},
+        bodiesDone, bodiesTotal);
     y += metrics.progressBarHeight + kPercentOffset + lineHeight + gap;
   }
 
@@ -463,15 +502,39 @@ void ReadwiseSyncActivity::renderFailed() const {
   const auto lines = failureDetail[0] != '\0' && available > 0
                          ? renderer.wrappedText(UI_10_FONT_ID, failureDetail, available, 8)
                          : std::vector<std::string>{};
+  char highlightLine[80];
+  highlightLine[0] = '\0';
+  if (highlightsSent > 0 || highlightsFailed > 0) {
+    size_t used = 0;
+    if (highlightsSent > 0) {
+      const int wrote =
+          snprintf(highlightLine, sizeof(highlightLine), "%u %s", static_cast<unsigned>(highlightsSent),
+                   highlightsSent == 1 ? tr(STR_READWISE_HIGHLIGHT_SENT) : tr(STR_READWISE_HIGHLIGHTS_SENT));
+      if (wrote > 0) {
+        used = static_cast<size_t>(wrote);
+      }
+    }
+    if (highlightsFailed > 0 && used + 1 < sizeof(highlightLine)) {
+      snprintf(highlightLine + used, sizeof(highlightLine) - used, "%s%u %s", used > 0 ? ", " : "",
+               static_cast<unsigned>(highlightsFailed),
+               highlightsFailed == 1 ? tr(STR_READWISE_HIGHLIGHT_FAILED) : tr(STR_READWISE_HIGHLIGHTS_FAILED));
+    }
+  }
   const int gap = lines.empty() ? 0 : 8;
-  const int block = lineHeight + gap + static_cast<int>(lines.size()) * lineHeight;
+  const int highlightRows = highlightLine[0] != '\0' ? 1 : 0;
+  const int block = lineHeight + highlightRows * lineHeight + gap + static_cast<int>(lines.size()) * lineHeight;
   int y = top + (bottom - top - block) / 2;
   if (y < top) {
     y = top;
   }
 
   renderer.drawCenteredText(UI_10_FONT_ID, y, statusMessage.c_str(), true, EpdFontFamily::BOLD);
-  y += lineHeight + gap;
+  y += lineHeight;
+  if (highlightLine[0] != '\0') {
+    renderer.drawCenteredText(UI_10_FONT_ID, y, highlightLine, true);
+    y += lineHeight;
+  }
+  y += gap;
   for (const auto& line : lines) {
     renderer.drawText(UI_10_FONT_ID, x, y, line.c_str());
     y += lineHeight;

@@ -75,6 +75,17 @@ class OptionPopup {
   bool handleInput(MappedInputManager& input, const std::function<void()>& requestUpdate) {
     if (!active) return false;
 
+    // A confirm is armed until the render task has presented the pressed row.
+    // Firing in this call would run the action before that refresh, which on
+    // e-ink looks like the menu did nothing. The next loop sees commitShown,
+    // set only after displayBuffer returns.
+    if (commitArmed.load()) {
+      if (commitShown.load()) {
+        fire(requestUpdate, acceptHaptic);
+      }
+      return true;
+    }
+
     // Match the render cap: only the first MAX_OPTIONS rows exist on screen,
     // so button wrap-around must not select an invisible option.
     const int total = static_cast<int>(ownedStrings.size());
@@ -86,12 +97,13 @@ class OptionPopup {
       if (uiReady) {
         const freeink::ui::ActionEvent event = interactions.routePublished(snap);
         if (event && event.action == ACTION_OPTION) {
-          // Tap released on an option: select it, fire, dismiss.
           selectedIndex = event.value;
-          active = false;
-          if (onSelectCallback) onSelectCallback(selectedIndex);
-          haptic_feedback::touchAction();
-          requestUpdate();
+          // The finger-down frame already inverted this row.
+          if (pressPainted.load() == selectedIndex) {
+            fire(requestUpdate, true);
+          } else {
+            arm(requestUpdate, true);
+          }
           return true;
         }
         if (event && event.action == ACTION_CHROME) {
@@ -101,20 +113,28 @@ class OptionPopup {
         if (snap.touchReleased && snap.touchX >= 0) {
           // Tap released outside the dialog: dismiss without firing. Swipe-end
           // releases arrive with -1,-1 coords and fall through (no dismiss).
+          clearPress();
           active = false;
           haptic_feedback::touchAction();
           requestUpdate();
           return true;
         }
         if (snap.touchPressed) {
-          // Touch-down on an option moves the highlight (route() latched the
-          // hit as the active interaction; read it back, no re-hit-testing).
+          // Touch-down on an option inverts it, including when it was already
+          // the focused row. Skipping that redraw left a tap with no feedback.
           const int16_t idx = interactions.activeIndex();
           if (idx >= 0) {
             const freeink::ui::Interaction& hit = interactions.publishedData()[idx];
-            if (hit.action == ACTION_OPTION && selectedIndex != hit.value) {
-              selectedIndex = hit.value;
-              requestUpdate();
+            if (hit.action == ACTION_OPTION) {
+              const int hitIndex = hit.value;
+              if (selectedIndex != hitIndex || pressPainted.load() != hitIndex) {
+                selectedIndex = hitIndex;
+                pressIndex.store(hitIndex);
+                pressPainted.store(-1);
+                requestUpdate();
+              } else {
+                pressIndex.store(hitIndex);
+              }
             }
           }
         }
@@ -123,19 +143,20 @@ class OptionPopup {
     }
 
     if (input.wasPressed(MappedInputManager::Button::NavPrevious)) {
+      clearPress();
       selectedIndex = (selectedIndex - 1 + count) % count;
       requestUpdate();
       return true;
     } else if (input.wasPressed(MappedInputManager::Button::NavNext)) {
+      clearPress();
       selectedIndex = (selectedIndex + 1) % count;
       requestUpdate();
       return true;
     } else if (input.wasReleased(MappedInputManager::Button::Confirm)) {
-      active = false;
-      if (onSelectCallback) onSelectCallback(selectedIndex);
-      requestUpdate();
+      arm(requestUpdate, false);
       return true;
     } else if (input.wasReleased(MappedInputManager::Button::Back)) {
+      clearPress();
       active = false;
       requestUpdate();
       return true;
@@ -145,10 +166,21 @@ class OptionPopup {
 
   bool processRender(GfxRenderer& renderer, const MappedInputManager& input) const {
     if (!active) return false;
+    // Snapshot before drawing. A confirm that arrives while this frame is on
+    // the panel must wait for a later frame that actually shows the press.
+    framePress = pressIndex.load();
+    const bool armedAtStart = commitArmed.load();
     const auto popupLabels = input.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
     GUI.drawButtonHints(renderer, popupLabels.btn1, popupLabels.btn2, popupLabels.btn3, popupLabels.btn4);
     render(renderer);
     renderer.displayBuffer();
+    if (framePress >= 0 && framePress == selectedIndex && pressIndex.load() == framePress) {
+      pressPainted.store(framePress);
+    }
+    if (armedAtStart && commitArmed.load() && framePress >= 0 && framePress == selectedIndex &&
+        pressIndex.load() == framePress) {
+      commitShown.store(true);
+    }
     return true;
   }
 
@@ -185,7 +217,13 @@ class OptionPopup {
       options[i].label = ownedStrings[i].c_str();
       options[i].action = ACTION_OPTION;
       options[i].value = static_cast<int16_t>(i);
-      options[i].state = (i == selectedIndex) ? fui::StateFocused : fui::StateNormal;
+      if (i == selectedIndex && framePress == i) {
+        options[i].state = fui::StateActive;
+      } else if (i == selectedIndex) {
+        options[i].state = fui::StateFocused;
+      } else {
+        options[i].state = fui::StateNormal;
+      }
     }
 
     fui::OptionDialogProps props;
@@ -259,6 +297,7 @@ class OptionPopup {
   void dismiss() {
     active = false;
     onSelectCallback = nullptr;
+    clearPress();
   }
 
  private:
@@ -275,8 +314,42 @@ class OptionPopup {
     selectedIndex = currentIndex >= 0 && currentIndex < count ? currentIndex : 0;
     onSelectCallback = std::move(onSelect);
     message.clear();
+    clearPress();
     uiReady = false;
     active = count > 0;
+  }
+
+  void clearPress() const {
+    pressIndex.store(-1);
+    pressPainted.store(-1);
+    commitArmed.store(false);
+    commitShown.store(false);
+    acceptHaptic = false;
+  }
+
+  // Ask for one refresh of the inverted row, then return. handleInput fires
+  // the callback on a later call, after processRender has presented it.
+  void arm(const std::function<void()>& requestUpdate, bool haptic) {
+    acceptHaptic = haptic;
+    pressIndex.store(selectedIndex);
+    pressPainted.store(-1);
+    commitShown.store(false);
+    commitArmed.store(true);
+    requestUpdate();
+  }
+
+  void fire(const std::function<void()>& requestUpdate, bool haptic) {
+    const int index = selectedIndex;
+    auto callback = std::move(onSelectCallback);
+    active = false;
+    clearPress();
+    if (haptic) {
+      haptic_feedback::touchAction();
+    }
+    if (callback) {
+      callback(index);
+    }
+    requestUpdate();
   }
 
   bool active = false;
@@ -290,4 +363,13 @@ class OptionPopup {
   // uiReady closes the rebuild window exactly like UiListActivity::uiReady.
   mutable freeink::ui::InteractionBuffer<INTERACTION_CAPACITY> interactions;
   mutable std::atomic<bool> uiReady{false};
+  // Loop task writes these; the render task publishes pressPainted and
+  // commitShown only after displayBuffer, so the action cannot outrun the ink.
+  mutable std::atomic<int> pressIndex{-1};
+  mutable std::atomic<int> pressPainted{-1};
+  mutable std::atomic<bool> commitArmed{false};
+  mutable std::atomic<bool> commitShown{false};
+  // Press index captured at the start of the frame currently being drawn.
+  mutable int framePress = -1;
+  mutable bool acceptHaptic = false;
 };

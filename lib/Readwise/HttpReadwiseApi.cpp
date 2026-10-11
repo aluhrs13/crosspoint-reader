@@ -77,7 +77,7 @@ void HttpReadwiseApi::noteHttpResult(int status, const char* body, size_t bodyLe
     return;
   }
   formatHttpDetail(status, body, bodyLen, detail_, sizeof(detail_));
-  if (mapped == ApiStatus::ServerError || mapped == ApiStatus::NotFound) {
+  if (mapped == ApiStatus::ServerError || mapped == ApiStatus::NotFound || mapped == ApiStatus::Rejected) {
     LOG_ERR("RWAPI", "%s", detail_);
   }
 }
@@ -199,7 +199,7 @@ ApiStatus HttpReadwiseApi::fetchBody(const char* id, BodySink& sink, uint16_t* r
 }
 
 ApiStatus HttpReadwiseApi::pushHighlight(const char* text, const char* title, const char* author,
-                                        const char* sourceUrl) {
+                                         const char* sourceUrl) {
   detail_[0] = '\0';
   if (token.empty()) {
     return ApiStatus::NoCredentials;

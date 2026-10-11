@@ -61,7 +61,7 @@ class ReadwiseLibraryActivity final : public UiTabListActivity {
   void drawFooter() override;
   static void provideRow(void* ctx, uint16_t index, freeink::ui::ListItem& item);
 
-  int tabCount() const override { return TAB_COUNT; }
+  int tabCount() const override { return queuedCount > 0 ? TAB_COUNT + 1 : TAB_COUNT; }
   int activeTab() const override { return locationIndex; }
   const char* tabLabel(int index) const override;
   void onTabAction(int index) override;
@@ -76,6 +76,7 @@ class ReadwiseLibraryActivity final : public UiTabListActivity {
   void migrateLegacyTextBodies();
   static void sImageProgress(void* ctx, size_t done, size_t total);
   void queueMove(const readwise::Document& doc, readwise::Location target);
+  void commitLocationChange(const char* id, readwise::Location target, const char* remoteRev);
   // Applies a shelf action queued by the reader at the end of an article.
   void applyShelfReturn();
   void showEntryMenu(int index);
@@ -85,7 +86,9 @@ class ReadwiseLibraryActivity final : public UiTabListActivity {
   void applyAuthorFilter(const char* author);
   void clearAuthorFilter();
   bool authorFilterActive() const { return authorFilter[0] != '\0'; }
-  bool lengthTab() const { return locationIndex >= LOCATION_COUNT; }
+  bool lengthTab() const { return locationIndex == LONG_TAB || locationIndex == QUICK_TAB; }
+  bool queuedTab() const { return queuedCount > 0 && locationIndex == QUEUED_TAB; }
+  void refreshQueued();
   // Long-pressing a location button sends the selected article there instead
   // of switching to that view. Returns true while the button is held, so the
   // caller swallows the frame.
@@ -116,12 +119,19 @@ class ReadwiseLibraryActivity final : public UiTabListActivity {
   static constexpr int LONG_TAB = 3;
   static constexpr int QUICK_TAB = 4;
   static constexpr int TAB_COUNT = 5;
+  // Shown only while a delete or archive is still in the journal.
+  static constexpr int QUEUED_TAB = 5;
   // 1,500 words is about six minutes. Zero is on neither length tab.
   static constexpr uint32_t LONG_READ_WORDS = 1500;
   static constexpr readwise::Location LOCATIONS[LOCATION_COUNT] = {
       readwise::Location::Later, readwise::Location::Shortlist, readwise::Location::Feed};
   int locationIndex = 0;
   uint16_t docCount = 0;
+  uint16_t queuedCount = 0;
+  std::vector<readwise::ReadwiseSyncEngine::QueuedDocument> queued;
+  // tabLabel() is called once per tab and the bar keeps the pointer, so the
+  // queued label (which includes the count) needs its own buffer.
+  mutable char queuedLabel[24] = {};
 
   // Sliding metadata window backing the visible rows.
   std::vector<readwise::Document> window;

@@ -72,6 +72,9 @@ class ReadwiseSyncActivity final : public Activity {
   OptionPopup skipPopup;
   uint16_t pushed = 0;
   uint16_t pulled = 0;
+  uint16_t highlightsSent = 0;
+  uint16_t highlightsFailed = 0;
+  char highlightDetail[FAILURE_DETAIL_CAP] = {};
   uint16_t bodiesDone = 0;
   uint16_t bodiesTotal = 0;
   uint16_t bodiesFailed = 0;

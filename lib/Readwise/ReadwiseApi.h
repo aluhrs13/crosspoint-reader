@@ -28,11 +28,16 @@ enum class ApiStatus : uint8_t {
   RateLimited,
   LowMemory,
   ParseError,
+  // HTTP 5xx. Retry on the next sync.
   ServerError,
   // A queued update whose document is already gone. Delete treats 404 as
   // success before this mapping; PATCH surfaces it so the sync can ask
-  // whether to drop that one op.
+  // whether to drop that one op. A highlight POST that answers 404 is a
+  // permanent reject for that quote only.
   NotFound,
+  // HTTP 4xx other than auth, rate-limit, and 404. The request will not
+  // succeed on retry, so the caller must skip it and continue.
+  Rejected,
 };
 
 const char* apiStatusName(ApiStatus status);

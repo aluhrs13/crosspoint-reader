@@ -719,18 +719,25 @@ One directory per article, holding everything the article owns:
 ```text
 bodies/<id>/
     article.epub      store-only (method 0) EPUB, written on device
-    highlights.bin    quotes taken on this device, version 1
     epub_<hash>/      the reader's own cache: book.bin, sections, extracted
                       images, .pxc pixel caches, cover/thumb bitmaps
+
+highlights/<id>.bin   quotes taken on this device, version 1
 ```
 
-`highlights.bin` is the clip queue for one article. The header snapshots the
-title, author, and source URL at the first quote, and each record is a little-
-endian length, a flags byte (`bit 0` set once `POST /api/v2/highlights/` has
-accepted it), and the quote bytes (at most 280). A repeat of the same quote is
-not stored again. `highlights.idx` at the Readwise root lists the document ids
-that still have an unposted quote, because sync cannot list the bodies
-directory. Deleting the article directory deletes the quotes with it.
+`highlights/<id>.bin` is the clip queue for one article. It sits outside
+`bodies/<id>/` so archiving or deleting the article does not delete an unsent
+quote. Older builds stored the same file at `bodies/<id>/highlights.bin`; the
+next read copies it to the new path and leaves the old file in place if that
+copy fails. The header snapshots the title, author, and source URL at the
+first quote, and each record is a little-endian length, a flags byte, and the
+quote bytes (at most 280). `bit 0` is set once `POST /api/v2/highlights/` has
+accepted the quote. `bit 1` is set when the server rejects it (HTTP 4xx); that
+quote is not retried. A repeat of the same quote is not stored again.
+`highlights.idx` at the Readwise root lists the document ids that still have
+an unposted, non-rejected quote, because sync cannot list the directory. The
+quote file is kept after the index drops the id, so a posted or rejected quote
+can still be drawn on the page.
 
 `article.epub` is built from the API's `html_content` as it streams, and
 contains `mimetype`, `META-INF/container.xml`, `OEBPS/content.opf`,

@@ -129,6 +129,30 @@ bool ReadwiseJournal::removeAcknowledged(const std::vector<uint32_t>& seqs) {
   return persist();
 }
 
+bool ReadwiseJournal::dropQueuedDocument(const char* id) {
+  if (id == nullptr || id[0] == '\0') {
+    return false;
+  }
+  std::vector<PendingOp> kept;
+  kept.reserve(entries_.size());
+  bool changed = false;
+  for (const PendingOp& entry : entries_) {
+    const bool same = strncmp(entry.id, id, ID_CAP) == 0;
+    const bool archive = entry.op == OpType::SetLocation && static_cast<Location>(entry.payload) == Location::Archive;
+    const bool drop = same && (entry.op == OpType::Delete || archive);
+    if (drop) {
+      changed = true;
+      continue;
+    }
+    kept.push_back(entry);
+  }
+  if (!changed) {
+    return false;
+  }
+  entries_.swap(kept);
+  return persist();
+}
+
 const PendingOp* ReadwiseJournal::findLatest(const char* id, OpType op) const {
   if (id == nullptr) {
     return nullptr;

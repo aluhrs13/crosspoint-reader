@@ -1,0 +1,45 @@
+diff --git a/libs/ui/FreeInkUI/include/components/lists/list.h b/libs/ui/FreeInkUI/include/components/lists/list.h
+index 558604e..332d9a5 100644
+--- a/libs/ui/FreeInkUI/include/components/lists/list.h
++++ b/libs/ui/FreeInkUI/include/components/lists/list.h
+@@ -27,9 +27,11 @@ struct ListItem {
+   bool toggle = false;
+   bool toggleChecked = false;
+   // Optional section heading drawn immediately before this selectable row.
+-  // It shares the row's logical index and interaction value. Kept last so
+-  // existing aggregate initializers remain source-compatible.
++  // It shares the row's logical index and interaction value.
+   const char *sectionHeading = nullptr;
++  // Draws a line through the label. Kept last so existing aggregate
++  // initializers remain source-compatible.
++  bool strikethrough = false;
+ };
+ 
+ struct ListNav;
+@@ -883,6 +885,26 @@ void list(Frame<MaxInteractions> &frame, Rect rect, const ListProps &props) {
+                           labelStyle);
+     }
+ 
++    if (item.strikethrough && item.label && item.label[0] != '\0') {
++      const Size measured =
++          frame.target().measureText(labelStyle.font, item.label, labelStyle);
++      int16_t strikeW = measured.width;
++      if (strikeW > availW)
++        strikeW = availW;
++      if (strikeW > 0) {
++        int16_t strikeX = labelX;
++        if (labelStyle.align == TextAlign::Right)
++          strikeX = static_cast<int16_t>(labelX + availW - strikeW);
++        else if (labelStyle.align == TextAlign::Center)
++          strikeX = static_cast<int16_t>(labelX + (availW - strikeW) / 2);
++        const int16_t lineH = measured.height > 0 ? measured.height : band.height;
++        const int16_t mid = static_cast<int16_t>(band.y + lineH / 2);
++        // Foreground follows the row, so the line stays visible on an
++        // inverted selection.
++        frame.target().fill(Rect{strikeX, mid, strikeW, 2}, style.foreground, 0);
++      }
++    }
++
+     if (!partial && props.selectedIndex == static_cast<int16_t>(i) &&
+         props.selectionMarker != SelectionMarker::None) {
+       if (props.selectionMarker == SelectionMarker::Underline) {

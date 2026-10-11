@@ -19,6 +19,8 @@
 #include "activities/readwise/ReadwiseSupport.h"
 #include "components/OptionPopup.h"
 
+class Page;
+
 class EpubReaderActivity final : public ReaderActivity {
   std::shared_ptr<Epub> epub;
   std::unique_ptr<Section> section = nullptr;
@@ -66,6 +68,23 @@ class EpubReaderActivity final : public ReaderActivity {
   char readwiseEndAuthor[readwise::AUTHOR_CAP] = {};
   ReadwiseUi::ReadwiseEntryAction readwiseEndActions[4] = {};
   uint8_t readwiseEndActionCount = 0;
+  // Underlines for quotes already saved on this article. Built once per page
+  // paint; grayscale strips redraw these segments and do not re-read the file.
+  struct HighlightSegment {
+    int16_t x = 0;
+    int16_t y = 0;
+    int16_t width = 0;
+    uint8_t posted = 0;
+  };
+  static constexpr uint8_t HIGHLIGHT_SEGMENT_MAX = 48;
+  HighlightSegment highlightSegments[HIGHLIGHT_SEGMENT_MAX] = {};
+  uint8_t highlightSegmentCount = 0;
+  char highlightDocId[readwise::ID_CAP] = {};
+  bool showHighlightMessage = false;
+  unsigned long highlightMessageTime = 0UL;
+  const char* highlightDocumentId();
+  void ensureHighlightMarks(const Page& page, int fontId, int marginLeft, int marginTop);
+  void drawHighlightMarks() const;
   void offerReadwiseEndMenu();
   void showReadwiseEndMenu();
   void onReadwiseEndMenu(int selected);

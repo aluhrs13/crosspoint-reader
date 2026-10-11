@@ -195,16 +195,13 @@ void ReadwisePreambleActivity::navigateButtons() {
   // Index 0 is the Open/Download button above the metadata. The list rows
   // follow, so Up from the first field returns to that button.
   const int count = static_cast<int>(rowCount) + 1;
-  buttonNavigator.onNextPress(
-      [this, count] { moveSelectionTo(ButtonNavigator::nextIndex(nav.selected, count)); });
+  buttonNavigator.onNextPress([this, count] { moveSelectionTo(ButtonNavigator::nextIndex(nav.selected, count)); });
   buttonNavigator.onPreviousPress(
       [this, count] { moveSelectionTo(ButtonNavigator::previousIndex(nav.selected, count)); });
-  buttonNavigator.onNextContinuous([this, count] {
-    moveSelectionTo(ButtonNavigator::nextPageIndex(nav.selected, count, nav.inputPageRows()));
-  });
-  buttonNavigator.onPreviousContinuous([this, count] {
-    moveSelectionTo(ButtonNavigator::previousPageIndex(nav.selected, count, nav.inputPageRows()));
-  });
+  buttonNavigator.onNextContinuous(
+      [this, count] { moveSelectionTo(ButtonNavigator::nextPageIndex(nav.selected, count, nav.inputPageRows())); });
+  buttonNavigator.onPreviousContinuous(
+      [this, count] { moveSelectionTo(ButtonNavigator::previousPageIndex(nav.selected, count, nav.inputPageRows())); });
 }
 
 const char* ReadwisePreambleActivity::headerTitle() const {

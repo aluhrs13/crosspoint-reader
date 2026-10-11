@@ -1,4 +1,5 @@
 add_executable(ReadwiseStorageTest
+  HighlightMarkTest.cpp
   ReadwiseCodecTest.cpp
   ReadwiseSyncEngineTest.cpp
   ZipWriterTest.cpp
@@ -19,6 +20,7 @@ add_executable(ReadwiseStorageTest
 )
 
 target_include_directories(ReadwiseStorageTest PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/stubs
   ${REPO_ROOT}/lib/Readwise
   ${REPO_ROOT}/lib/Memory
   ${CMAKE_CURRENT_SOURCE_DIR}

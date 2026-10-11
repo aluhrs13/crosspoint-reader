@@ -86,9 +86,15 @@ struct SyncOutcome {
   uint16_t pushed = 0;
   uint16_t pulled = 0;
   uint16_t retained = 0;
+  // Quotes accepted this pass, and quotes the server rejected (4xx). A
+  // rejection does not fail the sync. Both stay 0 when nothing was queued.
+  uint16_t highlightsSent = 0;
+  uint16_t highlightsFailed = 0;
   // What failed, for the screen and the log. Empty on success.
   // "delete <id>: HTTP 400 {...}", "highlight <id>", "pull later".
+  // highlightDetail holds the first rejection ("highlight <id>: HTTP 400 ...").
   static constexpr size_t DETAIL_CAP = 160;
+  char highlightDetail[DETAIL_CAP] = {};
   char detail[DETAIL_CAP] = {};
 };
 
@@ -141,8 +147,9 @@ class ReadwiseSyncEngine {
   bool queueSeen(const char* id, const char* remoteRev);
   bool queueDelete(const char* id, const char* remoteRev);
 
-  // Drops the local record, cached body, and note. Call only after the server
-  // has accepted the delete. A failed push must leave the document in place.
+  // Drops the local record, cached body, and note. An unposted quote is kept
+  // and still pushed on a later sync. Call only after the server has accepted
+  // the delete. A failed push must leave the document in place.
   bool forgetDocument(const char* id);
 
   // A note kept beside the document, not in docs.bin. Empty text removes it.
@@ -155,6 +162,14 @@ class ReadwiseSyncEngine {
   // a word boundary. Title, author, and source URL are copied from docs.bin
   // when the document is still there. Empty text is refused.
   bool appendHighlight(const char* id, const char* text);
+
+  // Quotes stored for this document, including ones already posted. `out`
+  // receives at most `cap` records. Returns the count, or 0 when there are none.
+  struct StoredHighlight {
+    char text[HIGHLIGHT_TEXT_MAX + 1] = {};
+    uint8_t flags = 0;
+  };
+  int readHighlights(const char* id, StoredHighlight* out, int cap);
 
   // Location-index offsets whose author matches, in shelf order. One document
   // is decoded at a time. `author` is the stored AUTHOR_CAP string.
@@ -181,6 +196,22 @@ class ReadwiseSyncEngine {
   // immediately: archiving a document offline removes it from the synced
   // indexes right away rather than at the next sync.
   bool rebuildLocal();
+
+  // Documents with a pending archive or delete, oldest journal entry first.
+  // A pending delete is `deleted` even when an archive is also queued. The
+  // title falls back to the id when the document is no longer cached. At most
+  // QUEUED_LIST_MAX rows; further pending ids are omitted.
+  static constexpr size_t QUEUED_LIST_MAX = 64;
+  struct QueuedDocument {
+    char id[ID_CAP] = {};
+    char title[TITLE_CAP] = {};
+    char author[AUTHOR_CAP] = {};
+    bool deleted = false;
+  };
+  bool collectQueued(std::vector<QueuedDocument>& out);
+  // Drops a pending delete and a pending archive for this id. The caller
+  // rebuilds the local indexes so the document returns to its shelf.
+  bool undoQueued(const char* id);
 
   // Linear scan of docs.bin for one document. Used when a managed body path is
   // reopened (e.g. resume after restart) and the UI needs its metadata back.
@@ -322,15 +353,30 @@ class ReadwiseSyncEngine {
   bool loadIndexedDocument(Location location, uint16_t slot, const DocsHeader& header, uint16_t* recordIndex = nullptr);
   bool loadRecord(uint16_t recordIndex, const DocsHeader& header);
   std::string notePath(const char* id) const;
+  std::string highlightDir() const;
+  // Current quote file. Legacy copies live under the article directory.
   std::string highlightPath(const char* id) const;
+  std::string legacyHighlightPath(const char* id) const;
   std::string highlightIndexPath() const;
+  // Copies a legacy quote file out of the article directory. True when the
+  // current path is the one to use, including when there was nothing to move.
+  bool relocateHighlight(const char* id);
+  // Removes an article directory after moving any quote file out of it. If the
+  // move fails the directory stays, so an unsent quote is not deleted.
+  void dropArticleDir(const char* id);
   bool indexHighlight(const char* id);
-  bool unindexHighlight(const char* id);
-  // Posts unposted clips. A transport failure leaves the rest queued.
-  // `step` receives a short label ("highlight <id>", "highlight index") on failure.
-  ApiStatus pushPendingHighlights(char* step, size_t stepCap);
+  struct HighlightPushStats {
+    uint16_t sent = 0;
+    uint16_t failed = 0;
+    char detail[SyncOutcome::DETAIL_CAP] = {};
+  };
+  // Posts unposted clips. A transport failure leaves the rest queued. A quote
+  // the server rejects is marked and skipped. `step` receives a short label
+  // ("highlight <id>", "highlight index") on a retryable failure.
+  ApiStatus pushPendingHighlights(char* step, size_t stepCap, HighlightPushStats& stats);
   // One document. `stillPending` is true when a clip remains unposted.
-  ApiStatus pushHighlightFile(const char* id, bool& stillPending, char* step, size_t stepCap);
+  ApiStatus pushHighlightFile(const char* id, bool& stillPending, char* step, size_t stepCap,
+                              HighlightPushStats& stats);
 
   std::string stagingPath() const { return baseDir_ + "/incoming.bin"; }
 

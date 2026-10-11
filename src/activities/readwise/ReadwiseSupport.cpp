@@ -92,6 +92,8 @@ StrId statusStrId(readwise::ApiStatus status) {
       return StrId::STR_READWISE_SERVER_ERROR;
     case readwise::ApiStatus::NotFound:
       return StrId::STR_READWISE_NOT_ON_SERVER;
+    case readwise::ApiStatus::Rejected:
+      return StrId::STR_READWISE_REJECTED;
   }
   return StrId::STR_READWISE_SYNC_FAILED;
 }

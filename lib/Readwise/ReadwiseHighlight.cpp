@@ -120,4 +120,136 @@ bool buildHighlightBody(const char* text, const char* title, const char* author,
   return true;
 }
 
+namespace {
+
+bool nextToken(const char*& p, const char*& token, uint16_t& length) {
+  while (*p == ' ') {
+    ++p;
+  }
+  if (*p == '\0') {
+    return false;
+  }
+  token = p;
+  while (*p != '\0' && *p != ' ') {
+    ++p;
+  }
+  length = static_cast<uint16_t>(p - token);
+  return length > 0;
+}
+
+uint16_t countTokens(const char* quote) {
+  uint16_t count = 0;
+  const char* token = nullptr;
+  uint16_t length = 0;
+  const char* p = quote != nullptr ? quote : "";
+  while (nextToken(p, token, length)) {
+    ++count;
+  }
+  return count;
+}
+
+bool sameWord(const HighlightWordView& word, const char* token, uint16_t length) {
+  return word.text != nullptr && word.length == length && memcmp(word.text, token, length) == 0;
+}
+
+// True when `count` words at `start` equal quote tokens [first, first + count).
+bool tokensEqual(const HighlightWordView* words, uint16_t start, const char* quote, uint16_t first, uint16_t count) {
+  const char* p = quote != nullptr ? quote : "";
+  uint16_t index = 0;
+  const char* token = nullptr;
+  uint16_t length = 0;
+  while (nextToken(p, token, length)) {
+    if (index >= first) {
+      const uint16_t offset = static_cast<uint16_t>(index - first);
+      if (offset >= count || !sameWord(words[start + offset], token, length)) {
+        return false;
+      }
+    }
+    ++index;
+    if (index >= first + count) {
+      return true;
+    }
+  }
+  return false;
+}
+
+uint16_t matchLengthAt(const HighlightWordView* words, uint16_t wordCount, uint16_t start, const char* quote) {
+  const char* p = quote != nullptr ? quote : "";
+  uint16_t matched = 0;
+  const char* token = nullptr;
+  uint16_t length = 0;
+  while (nextToken(p, token, length)) {
+    if (start + matched >= wordCount || !sameWord(words[start + matched], token, length)) {
+      return 0;
+    }
+    ++matched;
+  }
+  return matched;
+}
+
+void paint(uint8_t* marks, uint16_t start, uint16_t count, bool posted) {
+  const uint8_t style = static_cast<uint8_t>(posted ? HighlightMark::Posted : HighlightMark::Pending);
+  for (uint16_t i = 0; i < count; ++i) {
+    if (marks[start + i] == static_cast<uint8_t>(HighlightMark::Posted)) {
+      continue;
+    }
+    if (posted || marks[start + i] == static_cast<uint8_t>(HighlightMark::None)) {
+      marks[start + i] = style;
+    }
+  }
+}
+
+}  // namespace
+
+void markHighlightWords(const HighlightWordView* words, const uint16_t wordCount, const char* const* quotes,
+                        const uint8_t* quoteFlags, const uint16_t quoteCount, uint8_t* marks) {
+  if (marks == nullptr) {
+    return;
+  }
+  if (wordCount > 0) {
+    memset(marks, 0, wordCount);
+  }
+  if (words == nullptr || quotes == nullptr || quoteFlags == nullptr || wordCount == 0) {
+    return;
+  }
+  for (uint16_t q = 0; q < quoteCount; ++q) {
+    const char* quote = quotes[q];
+    if (quote == nullptr || quote[0] == '\0') {
+      continue;
+    }
+    const bool posted = (quoteFlags[q] & HIGHLIGHT_FLAG_POSTED) != 0;
+    const uint16_t tokens = countTokens(quote);
+    if (tokens == 0) {
+      continue;
+    }
+    bool full = false;
+    for (uint16_t i = 0; i < wordCount;) {
+      const uint16_t matched = matchLengthAt(words, wordCount, i, quote);
+      if (matched > 0) {
+        paint(marks, i, matched, posted);
+        full = true;
+        i = static_cast<uint16_t>(i + matched);
+      } else {
+        ++i;
+      }
+    }
+    if (full || tokens < HIGHLIGHT_PARTIAL_MIN_WORDS || wordCount < HIGHLIGHT_PARTIAL_MIN_WORDS) {
+      continue;
+    }
+    const uint16_t limit = wordCount < tokens ? wordCount : static_cast<uint16_t>(tokens - 1);
+    for (uint16_t k = limit; k >= HIGHLIGHT_PARTIAL_MIN_WORDS; --k) {
+      if (tokensEqual(words, static_cast<uint16_t>(wordCount - k), quote, 0, k)) {
+        paint(marks, static_cast<uint16_t>(wordCount - k), k, posted);
+        break;
+      }
+    }
+    for (uint16_t k = limit; k >= HIGHLIGHT_PARTIAL_MIN_WORDS; --k) {
+      if (tokensEqual(words, 0, quote, static_cast<uint16_t>(tokens - k), k)) {
+        paint(marks, 0, k, posted);
+        break;
+      }
+    }
+  }
+}
+
 }  // namespace readwise

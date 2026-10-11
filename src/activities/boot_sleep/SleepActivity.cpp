@@ -579,10 +579,9 @@ bool readCalendarDate(CalendarDate& out) {
 }
 
 bool libraryHasCounts(const readwise::LibraryCounts& counts) {
-  for (const readwise::CategoryCounts& row : counts.named) {
-    if (row.total > 0) return true;
-  }
-  return counts.other.total > 0;
+  return std::any_of(std::begin(counts.named), std::end(counts.named),
+                     [](const readwise::CategoryCounts& row) { return row.total > 0; }) ||
+         counts.other.total > 0;
 }
 
 // Heap, not stack: the engine's scratch document is ~800 bytes and the counts
@@ -624,12 +623,9 @@ void drawTextRight(const GfxRenderer& renderer, const int fontId, const int righ
 }
 
 int countStatRows(const readwise::LibraryCounts& counts) {
-  int rows = 0;
-  for (const readwise::CategoryCounts& row : counts.named) {
-    if (row.total > 0) ++rows;
-  }
-  if (counts.other.total > 0) ++rows;
-  return rows;
+  const int rows = static_cast<int>(std::count_if(std::begin(counts.named), std::end(counts.named),
+                                                  [](const readwise::CategoryCounts& row) { return row.total > 0; }));
+  return rows + (counts.other.total > 0 ? 1 : 0);
 }
 
 void drawStatRow(const GfxRenderer& renderer, const int fontId, const int x, const int y, const int nameW,

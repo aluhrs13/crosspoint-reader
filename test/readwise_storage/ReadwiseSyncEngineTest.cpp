@@ -1110,8 +1110,12 @@ TEST(ReadwiseSync, HighlightIsPostedOnceOnSync) {
   const SyncOutcome posted = f.engine.sync();
   ASSERT_TRUE(posted.ok) << "failed at stage " << static_cast<int>(posted.failedStage);
   ASSERT_EQ(f.api.highlights.size(), 1u);
+  EXPECT_EQ(posted.highlightsSent, 1);
+  EXPECT_EQ(posted.highlightsFailed, 0);
   EXPECT_EQ(f.api.highlights[0].text, "Call me Ishmael");
   EXPECT_EQ(f.api.highlights[0].title, "Title");
+  EXPECT_TRUE(f.store.has(std::string(kBase) + "/highlights/" + id + ".bin"));
+  EXPECT_FALSE(f.store.has(std::string(kBase) + "/bodies/" + id + "/highlights.bin"));
 
   f.api.highlights.clear();
   ASSERT_TRUE(f.engine.sync().ok);
@@ -1129,10 +1133,159 @@ TEST(ReadwiseSync, HighlightPushFailureStaysQueued) {
   EXPECT_NE(std::string(failed.detail).find("highlight"), std::string::npos);
   EXPECT_NE(std::string(failed.detail).find(id), std::string::npos);
   EXPECT_TRUE(f.api.highlights.empty());
+  EXPECT_EQ(failed.highlightsSent, 0);
+  EXPECT_EQ(failed.highlightsFailed, 0);
 
   f.api.failHighlights = false;
   ASSERT_TRUE(f.engine.sync().ok);
   ASSERT_EQ(f.api.highlights.size(), 1u);
   EXPECT_EQ(f.api.highlights[0].text, "A quote with \"marks\"");
   EXPECT_TRUE(f.api.highlights[0].title.empty());
+}
+
+TEST(ReadwiseSync, ArchiveMovesHighlightOutOfTheArticleDir) {
+  Fixture f;
+  constexpr const char* id = "01hzzzzzzzzzzzzzzzzzzzzz08";
+  Document doc = makeDoc(id, Location::Later, kT1, kT1);
+  doc.flags |= FLAG_HAS_BODY;
+  f.api.pages.push_back({{doc}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  const std::string body = f.engine.bodyPath(id);
+  f.store.put(body, {'e', 'p', 'u', 'b'});
+  ASSERT_TRUE(f.engine.appendHighlight(id, "A sentence worth keeping"));
+
+  const std::string kept = std::string(kBase) + "/highlights/" + id + ".bin";
+  const std::string legacy = std::string(kBase) + "/bodies/" + id + "/highlights.bin";
+  const std::vector<uint8_t> bytes = f.store.files().at(kept);
+  f.store.put(legacy, bytes);
+  ASSERT_TRUE(f.store.remove(kept));
+
+  ASSERT_TRUE(f.engine.queueLocationChange(id, Location::Archive, kT1));
+  ASSERT_TRUE(f.engine.rebuildLocal());
+  EXPECT_FALSE(f.store.has(body)) << "the cached article is still evicted";
+  EXPECT_FALSE(f.store.has(legacy));
+  EXPECT_TRUE(f.store.has(kept));
+
+  const SyncOutcome posted = f.engine.sync();
+  ASSERT_TRUE(posted.ok) << posted.detail;
+  EXPECT_EQ(posted.highlightsSent, 1);
+  ASSERT_EQ(f.api.highlights.size(), 1u);
+  EXPECT_EQ(f.api.highlights[0].text, "A sentence worth keeping");
+  EXPECT_EQ(f.api.highlights[0].title, "Title");
+  EXPECT_TRUE(f.store.has(kept));
+}
+
+TEST(ReadwiseSync, ForgetDocumentKeepsUnsentHighlight) {
+  Fixture f;
+  constexpr const char* id = "01hzzzzzzzzzzzzzzzzzzzzz08";
+  f.api.pages.push_back({{makeDoc(id, Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  ASSERT_TRUE(f.engine.appendHighlight(id, "Still queued"));
+
+  const std::string kept = std::string(kBase) + "/highlights/" + id + ".bin";
+  ASSERT_TRUE(f.engine.forgetDocument(id));
+  EXPECT_TRUE(f.store.has(kept));
+  Document gone;
+  EXPECT_FALSE(f.engine.findDocument(id, gone));
+
+  const SyncOutcome posted = f.engine.sync();
+  ASSERT_TRUE(posted.ok) << posted.detail;
+  EXPECT_EQ(posted.highlightsSent, 1);
+  ASSERT_EQ(f.api.highlights.size(), 1u);
+  EXPECT_EQ(f.api.highlights[0].text, "Still queued");
+  EXPECT_EQ(f.api.highlights[0].title, "Title");
+}
+
+TEST(ReadwiseSync, LegacyHighlightIsMigratedWhenPushed) {
+  Fixture f;
+  constexpr const char* id = "01hzzzzzzzzzzzzzzzzzzzzz08";
+  ASSERT_TRUE(f.engine.appendHighlight(id, "From an older build"));
+  const std::string kept = std::string(kBase) + "/highlights/" + id + ".bin";
+  const std::string legacy = std::string(kBase) + "/bodies/" + id + "/highlights.bin";
+  const std::vector<uint8_t> bytes = f.store.files().at(kept);
+  f.store.put(legacy, bytes);
+  ASSERT_TRUE(f.store.remove(kept));
+
+  const SyncOutcome posted = f.engine.sync();
+  ASSERT_TRUE(posted.ok) << posted.detail;
+  EXPECT_EQ(posted.highlightsSent, 1);
+  EXPECT_TRUE(f.store.has(kept));
+  EXPECT_FALSE(f.store.has(legacy));
+  ASSERT_EQ(f.api.highlights.size(), 1u);
+  EXPECT_EQ(f.api.highlights[0].text, "From an older build");
+}
+
+TEST(ReadwiseSync, RejectedHighlightIsSkippedAndDoesNotBlockSync) {
+  Fixture f;
+  constexpr const char* id = "01hzzzzzzzzzzzzzzzzzzzzz08";
+  f.api.pages.push_back({{makeDoc(id, Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  ASSERT_TRUE(f.engine.appendHighlight(id, "Bad quote"));
+  ASSERT_TRUE(f.engine.appendHighlight(id, "Good quote"));
+  ASSERT_TRUE(f.engine.queueSeen(id, kT1));
+  f.api.rejectHighlightCount = 1;
+  f.api.detail = "HTTP 400 {\"detail\":\"bad highlight\"}";
+
+  const SyncOutcome outcome = f.engine.sync();
+  ASSERT_TRUE(outcome.ok) << outcome.detail;
+  EXPECT_EQ(outcome.highlightsSent, 1);
+  EXPECT_EQ(outcome.highlightsFailed, 1);
+  EXPECT_NE(std::string(outcome.highlightDetail).find("HTTP 400"), std::string::npos);
+  EXPECT_NE(std::string(outcome.highlightDetail).find(id), std::string::npos);
+  ASSERT_EQ(f.api.highlights.size(), 1u);
+  EXPECT_EQ(f.api.highlights[0].text, "Good quote");
+  ASSERT_EQ(f.api.pushed.size(), 1u);
+  EXPECT_EQ(f.api.pushed[0].op, OpType::SetSeen);
+
+  f.api.highlights.clear();
+  f.api.detail = "";
+  const SyncOutcome again = f.engine.sync();
+  ASSERT_TRUE(again.ok);
+  EXPECT_EQ(again.highlightsSent, 0);
+  EXPECT_EQ(again.highlightsFailed, 0);
+  EXPECT_TRUE(f.api.highlights.empty());
+  EXPECT_TRUE(f.store.has(std::string(kBase) + "/highlights/" + id + ".bin"));
+}
+
+TEST(ReadwiseSync, QueuedListShowsArchiveAndDeleteAndUndo) {
+  Fixture f;
+  constexpr const char* archived = "01hzzzzzzzzzzzzzzzzzzzzz21";
+  constexpr const char* deleted = "01hzzzzzzzzzzzzzzzzzzzzz22";
+  constexpr const char* unknown = "01hzzzzzzzzzzzzzzzzzzzzz23";
+  f.api.pages.push_back(
+      {{makeDoc(archived, Location::Later, kT1, kT1), makeDoc(deleted, Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  ASSERT_TRUE(f.engine.queueLocationChange(archived, Location::Archive, kT1));
+  ASSERT_TRUE(f.engine.queueDelete(deleted, kT1));
+  ASSERT_TRUE(f.engine.queueDelete(unknown, kT1));
+  ASSERT_TRUE(f.engine.queueSeen(archived, kT1));
+
+  std::vector<ReadwiseSyncEngine::QueuedDocument> rows;
+  ASSERT_TRUE(f.engine.collectQueued(rows));
+  ASSERT_EQ(rows.size(), 3u);
+  EXPECT_STREQ(rows[0].id, archived);
+  EXPECT_FALSE(rows[0].deleted);
+  EXPECT_STREQ(rows[0].title, "Title");
+  EXPECT_STREQ(rows[1].id, deleted);
+  EXPECT_TRUE(rows[1].deleted);
+  EXPECT_STREQ(rows[2].id, unknown);
+  EXPECT_TRUE(rows[2].deleted);
+  EXPECT_STREQ(rows[2].title, unknown);
+
+  ASSERT_TRUE(f.engine.undoQueued(archived));
+  ASSERT_TRUE(f.engine.rebuildLocal());
+  ASSERT_TRUE(f.engine.collectQueued(rows));
+  ASSERT_EQ(rows.size(), 2u);
+
+  std::vector<Document> page;
+  ASSERT_TRUE(f.engine.readIndexPage(Location::Later, 0, 10, page));
+  bool back = false;
+  for (const Document& doc : page) {
+    if (strcmp(doc.id, archived) == 0) {
+      back = true;
+    }
+  }
+  EXPECT_TRUE(back);
+  EXPECT_FALSE(f.engine.undoQueued("short"));
 }

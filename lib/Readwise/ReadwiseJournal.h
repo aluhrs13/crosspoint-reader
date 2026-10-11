@@ -39,6 +39,10 @@ class ReadwiseJournal {
   // survive, which is why this is a filtered rewrite rather than a truncation.
   bool removeAcknowledged(const std::vector<uint32_t>& seqs);
 
+  // Drops a pending delete and a pending move to Archive for this document.
+  // Seen and other location changes stay. Persists when an entry was removed.
+  bool dropQueuedDocument(const char* id);
+
   const std::vector<PendingOp>& entries() const { return entries_; }
   bool empty() const { return entries_.empty(); }
 

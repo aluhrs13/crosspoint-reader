@@ -158,6 +158,11 @@ ApiStatus statusFromHttp(int httpStatus) {
   if (httpStatus == 404) {
     return ApiStatus::NotFound;
   }
+  // A client error will not succeed by retrying the same body. 5xx stays
+  // ServerError so a transient fault is tried again on the next sync.
+  if (httpStatus >= 400 && httpStatus < 500) {
+    return ApiStatus::Rejected;
+  }
   return ApiStatus::ServerError;
 }
 

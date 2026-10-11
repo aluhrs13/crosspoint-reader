@@ -1,5 +1,6 @@
 #include "ReadwiseSyncEngine.h"
 
+#include <Logging.h>
 #include <Memory.h>
 
 #include <algorithm>
@@ -81,6 +82,8 @@ const char* apiStatusName(ApiStatus status) {
       return "server error";
     case ApiStatus::NotFound:
       return "not found";
+    case ApiStatus::Rejected:
+      return "rejected";
   }
   return "unknown";
 }
@@ -183,12 +186,20 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   journal_.coalesce();
 
   // --- 2. Push, oldest-first ---------------------------------------------
-  // Clips go first. A queued delete removes the article directory, and the
-  // quote file lives in it.
+  // Clips go first so a quote is posted before a queued delete forgets the
+  // document. The file itself lives outside the article directory.
   outcome.failedStage = SyncStage::Pushing;
   char step[64];
   step[0] = '\0';
-  const ApiStatus highlightStatus = pushPendingHighlights(step, sizeof(step));
+  HighlightPushStats highlightStats;
+  const ApiStatus highlightStatus = pushPendingHighlights(step, sizeof(step), highlightStats);
+  outcome.highlightsSent = highlightStats.sent;
+  outcome.highlightsFailed = highlightStats.failed;
+  copyBounded(outcome.highlightDetail, sizeof(outcome.highlightDetail), highlightStats.detail,
+              strlen(highlightStats.detail));
+  LOG_INF("RWSYNC", "Highlights sent=%u failed=%u%s%s", static_cast<unsigned>(outcome.highlightsSent),
+          static_cast<unsigned>(outcome.highlightsFailed), outcome.highlightDetail[0] != '\0' ? " " : "",
+          outcome.highlightDetail);
   if (highlightStatus != ApiStatus::Ok) {
     noteFailure(outcome, highlightStatus, step[0] != '\0' ? step : "highlight");
     return outcome;
@@ -278,8 +289,7 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   // shelf. The checkpoint is left in place: Feed, and the next incremental
   // sync, keep their window.
   const bool refillNonFeed = nonFeedShelfEmpty();
-  const ApiStatus pullStatus =
-      pullToStaging(checkpoint, staged, highestUpdatedAt, step, sizeof(step), refillNonFeed);
+  const ApiStatus pullStatus = pullToStaging(checkpoint, staged, highestUpdatedAt, step, sizeof(step), refillNonFeed);
   if (pullStatus != ApiStatus::Ok) {
     store_.remove(stagingPath());
     persistResolved();
@@ -471,8 +481,7 @@ ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::v
     }
 
     ListQuery query;
-    query.updatedAfter =
-        (refillNonFeed && policy.location != Location::Feed) ? "" : checkpoint.updatedAfter;
+    query.updatedAfter = (refillNonFeed && policy.location != Location::Feed) ? "" : checkpoint.updatedAfter;
     query.location = policy.location;
     query.limit = 100;
 
@@ -594,7 +603,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
     if ((doc.flags & FLAG_HAS_BODY) == 0) {
       return;
     }
-    store_.removeTree(articleDir(doc.id));
+    dropArticleDir(doc.id);
     doc.flags &= static_cast<uint8_t>(~FLAG_HAS_BODY);
   };
 
@@ -614,16 +623,14 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       drop = policy != nullptr && policy->unreadOnly && (doc.flags & FLAG_SEEN) != 0;
     }
     if (drop && (doc.flags & FLAG_HAS_BODY) != 0) {
-      store_.removeTree(articleDir(doc.id));
+      dropArticleDir(doc.id);
     }
     return drop;
   };
 
   // A queued delete stays in the file until the server accepts it. The list
   // reads location indexes, so leaving it out of those drops the row now.
-  auto queuedDelete = [&](const Document& doc) {
-    return journal_.findLatest(doc.id, OpType::Delete) != nullptr;
-  };
+  auto queuedDelete = [&](const Document& doc) { return journal_.findLatest(doc.id, OpType::Delete) != nullptr; };
 
   auto emit = [&](const Document& doc, size_t encodedLen) {
     offsets.push_back(cursor);
@@ -652,7 +659,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       return false;
     }
     if (droppingId_[0] != '\0' && sameId(scratchDoc_.id, droppingId_)) {
-      store_.removeTree(articleDir(scratchDoc_.id));
+      dropArticleDir(scratchDoc_.id);
       continue;
     }
     restoreLocalFlags(scratchDoc_);
@@ -662,7 +669,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
     if (!hideQueuedDelete && classWritten >= (isFeed ? feedCap_ : documentCap_)) {
       if (isFeed && (scratchDoc_.flags & FLAG_HAS_BODY) != 0) {
         // A feed item displaced by the cap is gone for good; reclaim its body.
-        store_.removeTree(articleDir(scratchDoc_.id));
+        dropArticleDir(scratchDoc_.id);
       }
       continue;
     }
@@ -705,7 +712,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       readOffset += static_cast<uint32_t>(consumed);
 
       if (droppingId_[0] != '\0' && sameId(scratchDoc_.id, droppingId_)) {
-        store_.removeTree(articleDir(scratchDoc_.id));
+        dropArticleDir(scratchDoc_.id);
         continue;
       }
 
@@ -721,7 +728,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
           // A tombstone: the pull saw this document seen in an unread-only
           // location and deliberately staged no replacement. The record dies
           // here, and its body with it -- no surviving copy carries the flag.
-          store_.removeTree(articleDir(scratchDoc_.id));
+          dropArticleDir(scratchDoc_.id);
         }
         continue;
       }
@@ -732,7 +739,7 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       if (!hideQueuedDelete && classWritten >= (isFeed ? feedCap_ : documentCap_)) {
         if (isFeed && (scratchDoc_.flags & FLAG_HAS_BODY) != 0) {
           // Displaced by newer staged feed items; reclaim the body.
-          store_.removeTree(articleDir(scratchDoc_.id));
+          dropArticleDir(scratchDoc_.id);
         }
         continue;
       }
@@ -907,6 +914,56 @@ bool ReadwiseSyncEngine::rebuildLocal() {
   return writeIndexes(indexEntries);
 }
 
+bool ReadwiseSyncEngine::collectQueued(std::vector<QueuedDocument>& out) {
+  out.clear();
+  if (!journal_.load()) {
+    return false;
+  }
+  out.reserve(QUEUED_LIST_MAX);
+  for (const PendingOp& op : journal_.entries()) {
+    if (out.size() >= QUEUED_LIST_MAX) {
+      break;
+    }
+    bool seen = false;
+    for (const QueuedDocument& row : out) {
+      if (sameId(row.id, op.id)) {
+        seen = true;
+        break;
+      }
+    }
+    if (seen) {
+      continue;
+    }
+    const PendingOp* deleted = journal_.findLatest(op.id, OpType::Delete);
+    const PendingOp* location = journal_.findLatest(op.id, OpType::SetLocation);
+    const bool archived = location != nullptr && static_cast<Location>(location->payload) == Location::Archive;
+    if (deleted == nullptr && !archived) {
+      continue;
+    }
+    QueuedDocument row{};
+    copyBounded(row.id, ID_CAP, op.id, strlen(op.id));
+    row.deleted = deleted != nullptr;
+    if (findDocument(op.id, scratchDoc_) && scratchDoc_.title[0] != '\0') {
+      copyBounded(row.title, TITLE_CAP, scratchDoc_.title, strlen(scratchDoc_.title));
+      copyBounded(row.author, AUTHOR_CAP, scratchDoc_.author, strlen(scratchDoc_.author));
+    } else {
+      copyBounded(row.title, TITLE_CAP, op.id, strlen(op.id));
+    }
+    out.push_back(row);
+  }
+  return true;
+}
+
+bool ReadwiseSyncEngine::undoQueued(const char* id) {
+  if (!isValidDocumentId(id)) {
+    return false;
+  }
+  if (!journal_.load()) {
+    return false;
+  }
+  return journal_.dropQueuedDocument(id);
+}
+
 bool ReadwiseSyncEngine::collectLibraryCounts(LibraryCounts& out) {
   static_assert(static_cast<int>(Category::Article) == 0, "named slots are indexed by Category");
   static_assert(static_cast<int>(Category::Epub) + 1 == LibraryCounts::kNamedCategories,
@@ -1024,7 +1081,63 @@ bool ReadwiseSyncEngine::writeNote(const char* id, const char* text) {
   return store_.writeAll(path, reinterpret_cast<const uint8_t*>(bounded), strlen(bounded));
 }
 
-std::string ReadwiseSyncEngine::highlightPath(const char* id) const { return articleDir(id) + "/highlights.bin"; }
+std::string ReadwiseSyncEngine::highlightDir() const { return baseDir_ + "/highlights"; }
+
+std::string ReadwiseSyncEngine::highlightPath(const char* id) const {
+  return highlightDir() + "/" + (id != nullptr ? id : "") + ".bin";
+}
+
+std::string ReadwiseSyncEngine::legacyHighlightPath(const char* id) const { return articleDir(id) + "/highlights.bin"; }
+
+bool ReadwiseSyncEngine::relocateHighlight(const char* id) {
+  if (!isValidDocumentId(id)) {
+    return false;
+  }
+  const std::string dest = highlightPath(id);
+  const std::string legacy = legacyHighlightPath(id);
+  if (!store_.exists(legacy)) {
+    return true;
+  }
+  // A crash between the copy and the delete leaves both. The copy is complete
+  // (writeAll is atomic), so the leftover is only removed.
+  if (store_.exists(dest)) {
+    store_.remove(legacy);
+    return !store_.exists(legacy);
+  }
+  const long fileSize = store_.size(legacy);
+  if (fileSize < 0 || static_cast<size_t>(fileSize) > HIGHLIGHT_FILE_MAX_BYTES) {
+    LOG_ERR("RWSYNC", "Highlight file for %s is missing or too large to move", id);
+    return false;
+  }
+  auto bytes = makeUniqueNoThrow<uint8_t[]>(static_cast<size_t>(fileSize));
+  if (!bytes) {
+    LOG_ERR("RWSYNC", "OOM: moving highlight for %s (%ld bytes)", id, fileSize);
+    return false;
+  }
+  if (store_.readRange(legacy, 0, bytes.get(), static_cast<size_t>(fileSize)) != static_cast<int>(fileSize)) {
+    LOG_ERR("RWSYNC", "Could not read legacy highlight for %s", id);
+    return false;
+  }
+  if (!store_.ensureDir(highlightDir()) || !store_.writeAll(dest, bytes.get(), static_cast<size_t>(fileSize))) {
+    LOG_ERR("RWSYNC", "Could not write highlight for %s", id);
+    return false;
+  }
+  store_.remove(legacy);
+  return !store_.exists(legacy);
+}
+
+void ReadwiseSyncEngine::dropArticleDir(const char* id) {
+  if (id == nullptr || id[0] == '\0') {
+    return;
+  }
+  // Quote files are only created for ids the highlight path accepts. A short
+  // test id, or any other body, has nothing to preserve.
+  if (isValidDocumentId(id) && (!relocateHighlight(id) || store_.exists(legacyHighlightPath(id)))) {
+    LOG_ERR("RWSYNC", "Leaving article dir for %s; an unsent highlight is still in it", id);
+    return;
+  }
+  store_.removeTree(articleDir(id));
+}
 
 std::string ReadwiseSyncEngine::highlightIndexPath() const { return baseDir_ + "/highlights.idx"; }
 
@@ -1088,51 +1201,6 @@ bool ReadwiseSyncEngine::indexHighlight(const char* id) {
   return true;
 }
 
-bool ReadwiseSyncEngine::unindexHighlight(const char* id) {
-  const std::string path = highlightIndexPath();
-  uint8_t header[3] = {};
-  if (store_.readRange(path, 0, header, sizeof(header)) != static_cast<int>(sizeof(header)) ||
-      header[0] != HIGHLIGHT_INDEX_VERSION) {
-    return true;
-  }
-  const uint16_t count = static_cast<uint16_t>(header[1] | (header[2] << 8));
-  if (count > HIGHLIGHT_INDEX_MAX) {
-    return store_.remove(path);
-  }
-  if (!store_.beginWrite(path)) {
-    return false;
-  }
-  uint8_t placeholder[3] = {HIGHLIGHT_INDEX_VERSION, 0, 0};
-  if (!store_.writeChunk(placeholder, sizeof(placeholder))) {
-    store_.abortWrite();
-    return false;
-  }
-  uint16_t kept = 0;
-  for (uint16_t i = 0; i < count; ++i) {
-    char existing[ID_CAP] = {};
-    const size_t at = sizeof(header) + static_cast<size_t>(i) * ID_CAP;
-    if (store_.readRange(path, at, reinterpret_cast<uint8_t*>(existing), ID_CAP) != ID_CAP) {
-      store_.abortWrite();
-      return false;
-    }
-    existing[ID_CAP - 1] = '\0';
-    if (sameId(existing, id)) {
-      continue;
-    }
-    if (!store_.writeChunk(reinterpret_cast<const uint8_t*>(existing), ID_CAP)) {
-      store_.abortWrite();
-      return false;
-    }
-    ++kept;
-  }
-  uint8_t nextHeader[3] = {HIGHLIGHT_INDEX_VERSION, static_cast<uint8_t>(kept & 0xFF), static_cast<uint8_t>(kept >> 8)};
-  if (!store_.patchWrite(0, nextHeader, sizeof(nextHeader)) || !store_.commitWrite()) {
-    store_.abortWrite();
-    return false;
-  }
-  return true;
-}
-
 bool ReadwiseSyncEngine::appendHighlight(const char* id, const char* text) {
   if (!isValidDocumentId(id) || text == nullptr) {
     return false;
@@ -1141,7 +1209,12 @@ bool ReadwiseSyncEngine::appendHighlight(const char* id, const char* text) {
   if (!fitHighlightText(highlightText_, sizeof(highlightText_))) {
     return false;
   }
-  if (!store_.ensureDir(articleDir(id))) {
+  // Fold a legacy file in before appending, so a new quote and the old ones
+  // stay in one file. A failed move must not start a second file.
+  if (!relocateHighlight(id)) {
+    return false;
+  }
+  if (!store_.ensureDir(highlightDir())) {
     return false;
   }
   const std::string path = highlightPath(id);
@@ -1213,8 +1286,8 @@ bool ReadwiseSyncEngine::appendHighlight(const char* id, const char* text) {
   size_t copied = 0;
   uint8_t chunk[128];
   while (copied < static_cast<size_t>(fileSize)) {
-    const size_t want = static_cast<size_t>(fileSize) - copied < sizeof(chunk) ? static_cast<size_t>(fileSize) - copied
-                                                                               : sizeof(chunk);
+    const size_t want =
+        static_cast<size_t>(fileSize) - copied < sizeof(chunk) ? static_cast<size_t>(fileSize) - copied : sizeof(chunk);
     const int got = store_.readRange(path, copied, chunk, want);
     if (got <= 0 || !store_.writeChunk(chunk, static_cast<size_t>(got))) {
       store_.abortWrite();
@@ -1231,8 +1304,46 @@ bool ReadwiseSyncEngine::appendHighlight(const char* id, const char* text) {
   return indexHighlight(id);
 }
 
-ApiStatus ReadwiseSyncEngine::pushHighlightFile(const char* id, bool& stillPending, char* step, size_t stepCap) {
+int ReadwiseSyncEngine::readHighlights(const char* id, StoredHighlight* out, const int cap) {
+  if (out == nullptr || cap <= 0 || !isValidDocumentId(id)) {
+    return 0;
+  }
+  relocateHighlight(id);
+  const std::string path = highlightPath(id);
+  const long fileSize = store_.size(path);
+  if (fileSize < 0 || static_cast<size_t>(fileSize) < HIGHLIGHT_HEADER_BYTES) {
+    return 0;
+  }
+  uint8_t version = 0;
+  if (store_.readRange(path, 0, &version, 1) != 1 || version != HIGHLIGHT_FILE_VERSION) {
+    return 0;
+  }
+  size_t offset = HIGHLIGHT_HEADER_BYTES;
+  int count = 0;
+  while (offset + 3 <= static_cast<size_t>(fileSize) && count < cap) {
+    uint8_t prefix[3] = {};
+    if (store_.readRange(path, offset, prefix, sizeof(prefix)) != static_cast<int>(sizeof(prefix))) {
+      break;
+    }
+    const size_t len = static_cast<size_t>(prefix[0] | (prefix[1] << 8));
+    if (len == 0 || len > HIGHLIGHT_TEXT_MAX || offset + 3 + len > static_cast<size_t>(fileSize)) {
+      break;
+    }
+    if (store_.readRange(path, offset + 3, reinterpret_cast<uint8_t*>(out[count].text), len) != static_cast<int>(len)) {
+      break;
+    }
+    out[count].text[len] = '\0';
+    out[count].flags = prefix[2];
+    ++count;
+    offset += 3 + len;
+  }
+  return count;
+}
+
+ApiStatus ReadwiseSyncEngine::pushHighlightFile(const char* id, bool& stillPending, char* step, size_t stepCap,
+                                                HighlightPushStats& stats) {
   stillPending = false;
+  relocateHighlight(id);
   const std::string path = highlightPath(id);
   const long fileSize = store_.size(path);
   if (fileSize < 0) {
@@ -1271,7 +1382,8 @@ ApiStatus ReadwiseSyncEngine::pushHighlightFile(const char* id, bool& stillPendi
       return ApiStatus::Ok;
     }
     const uint8_t flags = prefix[2];
-    if ((flags & HIGHLIGHT_FLAG_POSTED) == 0) {
+    const bool settled = (flags & (HIGHLIGHT_FLAG_POSTED | HIGHLIGHT_FLAG_FAILED)) != 0;
+    if (!settled) {
       if (store_.readRange(path, offset + 3, reinterpret_cast<uint8_t*>(highlightText_), len) !=
           static_cast<int>(len)) {
         stillPending = true;
@@ -1282,21 +1394,46 @@ ApiStatus ReadwiseSyncEngine::pushHighlightFile(const char* id, bool& stillPendi
           api_.pushHighlight(highlightText_, scratchDoc_.title, scratchDoc_.author, scratchDoc_.sourceUrl);
       if (status == ApiStatus::RateLimited) {
         for (int retry = 0; retry < MAX_RATE_LIMIT_RETRIES && status == ApiStatus::RateLimited; ++retry) {
-          status =
-              api_.pushHighlight(highlightText_, scratchDoc_.title, scratchDoc_.author, scratchDoc_.sourceUrl);
+          status = api_.pushHighlight(highlightText_, scratchDoc_.title, scratchDoc_.author, scratchDoc_.sourceUrl);
         }
       }
-      if (status != ApiStatus::Ok) {
+      // 4xx (and a highlight 404) will not succeed on retry. Mark the quote and
+      // keep going so one bad clip cannot stall every later sync.
+      if (status == ApiStatus::Rejected || status == ApiStatus::NotFound) {
+        const uint8_t failed = static_cast<uint8_t>(flags | HIGHLIGHT_FLAG_FAILED);
+        if (!store_.writeRange(path, offset + 2, &failed, 1)) {
+          stillPending = true;
+          return ApiStatus::Ok;
+        }
+        if (stats.failed < 0xFFFF) {
+          ++stats.failed;
+        }
+        const char* http = api_.lastDetail();
+        LOG_ERR("RWSYNC", "Highlight rejected for %s: %s", id != nullptr ? id : "",
+                http != nullptr && http[0] != '\0' ? http : apiStatusName(status));
+        if (stats.detail[0] == '\0') {
+          if (http != nullptr && http[0] != '\0') {
+            snprintf(stats.detail, sizeof(stats.detail), "highlight %s: %s", id != nullptr ? id : "", http);
+          } else {
+            snprintf(stats.detail, sizeof(stats.detail), "highlight %s: %s", id != nullptr ? id : "",
+                     apiStatusName(status));
+          }
+        }
+      } else if (status != ApiStatus::Ok) {
         stillPending = true;
         if (step != nullptr && stepCap > 0) {
           snprintf(step, stepCap, "highlight %s", id != nullptr ? id : "");
         }
         return status;
-      }
-      const uint8_t posted = static_cast<uint8_t>(flags | HIGHLIGHT_FLAG_POSTED);
-      if (!store_.writeRange(path, offset + 2, &posted, 1)) {
-        stillPending = true;
-        return ApiStatus::Ok;
+      } else {
+        const uint8_t posted = static_cast<uint8_t>(flags | HIGHLIGHT_FLAG_POSTED);
+        if (!store_.writeRange(path, offset + 2, &posted, 1)) {
+          stillPending = true;
+          return ApiStatus::Ok;
+        }
+        if (stats.sent < 0xFFFF) {
+          ++stats.sent;
+        }
       }
     }
     offset += 3 + len;
@@ -1304,7 +1441,7 @@ ApiStatus ReadwiseSyncEngine::pushHighlightFile(const char* id, bool& stillPendi
   return ApiStatus::Ok;
 }
 
-ApiStatus ReadwiseSyncEngine::pushPendingHighlights(char* step, size_t stepCap) {
+ApiStatus ReadwiseSyncEngine::pushPendingHighlights(char* step, size_t stepCap, HighlightPushStats& stats) {
   const std::string path = highlightIndexPath();
   uint8_t header[3] = {};
   if (store_.readRange(path, 0, header, sizeof(header)) != static_cast<int>(sizeof(header)) ||
@@ -1336,7 +1473,7 @@ ApiStatus ReadwiseSyncEngine::pushPendingHighlights(char* step, size_t stepCap) 
     }
     id[ID_CAP - 1] = '\0';
     bool stillPending = false;
-    const ApiStatus status = pushHighlightFile(id, stillPending, step, stepCap);
+    const ApiStatus status = pushHighlightFile(id, stillPending, step, stepCap, stats);
     if (status != ApiStatus::Ok) {
       store_.abortWrite();
       return status;
@@ -1365,9 +1502,8 @@ bool ReadwiseSyncEngine::forgetDocument(const char* id) {
     return false;
   }
   copyBounded(droppingId_, ID_CAP, id, strlen(id));
-  store_.removeTree(articleDir(id));
+  dropArticleDir(id);
   writeNote(id, "");
-  unindexHighlight(id);
   std::vector<IndexEntry> indexEntries;
   indexEntries.reserve(static_cast<size_t>(documentCap_) + feedCap_);
   uint16_t retained = 0;
@@ -1489,9 +1625,8 @@ bool ReadwiseSyncEngine::collectLengthSlots(const uint32_t minWords, const bool 
     }
   }
 
-  std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) {
-    return strncmp(a.lastMovedAt, b.lastMovedAt, TIMESTAMP_CAP) > 0;
-  });
+  std::sort(hits.begin(), hits.end(),
+            [](const Hit& a, const Hit& b) { return strncmp(a.lastMovedAt, b.lastMovedAt, TIMESTAMP_CAP) > 0; });
   out.reserve(hits.size());
   for (const Hit& hit : hits) {
     out.push_back(hit.recordIndex);
@@ -1873,7 +2008,7 @@ SyncOutcome ReadwiseSyncEngine::reconcile() {
       survivors.push_back(ref);
     } else {
       // The body cache goes with the document.
-      store_.removeTree(articleDir(scratchDoc_.id));
+      dropArticleDir(scratchDoc_.id);
       ++outcome.pulled;
     }
     readOffset += static_cast<uint32_t>(consumed);

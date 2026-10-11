@@ -99,14 +99,8 @@ void ReadwiseLibraryActivity::migrateLegacyTextBodies() {
 void ReadwiseLibraryActivity::onEnter() {
   // Restore the shelf before the base onEnter, which resets the active tab's
   // nav. activeTab() is locationIndex.
-  constexpr auto tabCount = static_cast<uint8_t>(TAB_COUNT);
-  locationIndex = APP_STATE.readwiseLocationIndex < tabCount ? static_cast<int>(APP_STATE.readwiseLocationIndex) : 0;
-  UiTabListActivity::onEnter();
-  // Every shelf starts on Sync now, matching the old single-list selection.
-  // Switching away and back keeps that tab's later scroll position.
-  for (auto& tab : tabNavs) {
-    tab.reset(1);
-  }
+  constexpr auto maxTab = static_cast<uint8_t>(QUEUED_TAB + 1);
+  locationIndex = APP_STATE.readwiseLocationIndex < maxTab ? static_cast<int>(APP_STATE.readwiseLocationIndex) : 0;
   engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(nullApi, store, ReadwiseCredentialStore::getDataDir());
   if (!engine) {
     LOG_ERR("RWLIB", "OOM: sync engine; library will show empty");
@@ -116,6 +110,15 @@ void ReadwiseLibraryActivity::onEnter() {
     // Reflect any actions queued in a previous session that a failed sync
     // left visible-state stale.
     engine->rebuildLocal();
+  }
+  // The queued tab exists only while something is pending, and onEnter sizes
+  // one nav per tab, so the count has to be known first.
+  refreshQueued();
+  UiTabListActivity::onEnter();
+  // Every shelf starts on Sync now, matching the old single-list selection.
+  // Switching away and back keeps that tab's later scroll position.
+  for (auto& tab : tabNavs) {
+    tab.reset(1);
   }
   migrateLegacyTextBodies();
   state = State::LIST;
@@ -151,13 +154,33 @@ void ReadwiseLibraryActivity::rememberLocation() {
   APP_STATE.saveToFile();
 }
 
+void ReadwiseLibraryActivity::refreshQueued() {
+  queued.clear();
+  if (engine != nullptr && !engine->collectQueued(queued)) {
+    LOG_ERR("RWLIB", "Queued list failed");
+    queued.clear();
+  }
+  queuedCount = static_cast<uint16_t>(queued.size());
+  if (locationIndex >= tabCount()) {
+    locationIndex = 0;
+  }
+  if (!tabNavs.empty() && tabNavs.size() != static_cast<size_t>(tabCount())) {
+    tabNavs.resize(static_cast<size_t>(tabCount()));
+  }
+}
+
 void ReadwiseLibraryActivity::reloadCounts() {
+  refreshQueued();
   window.clear();
   windowStart = 0;
   if (engine == nullptr) {
     authorSlots.clear();
     lengthSlots.clear();
     docCount = 0;
+  } else if (queuedTab()) {
+    authorSlots.clear();
+    lengthSlots.clear();
+    docCount = queuedCount;
   } else if (lengthTab()) {
     authorSlots.clear();
     const char* author = authorFilterActive() ? authorFilter : nullptr;
@@ -194,7 +217,7 @@ void ReadwiseLibraryActivity::reloadCounts() {
 }
 
 void ReadwiseLibraryActivity::ensureWindow(const int docIndex) {
-  if (engine == nullptr || docIndex < 0 || docIndex >= docCount) {
+  if (queuedTab() || engine == nullptr || docIndex < 0 || docIndex >= docCount) {
     return;
   }
   if (docIndex >= windowStart && docIndex < windowStart + static_cast<int>(window.size())) {
@@ -229,7 +252,7 @@ const readwise::Document* ReadwiseLibraryActivity::docAt(const int docIndex) {
 }
 
 void ReadwiseLibraryActivity::selectTab(const int index) {
-  if (index < 0 || index >= TAB_COUNT || index == locationIndex) {
+  if (index < 0 || index >= tabCount() || index == locationIndex) {
     return;
   }
   // The filter is a view of one shelf. Switching shelves drops it.
@@ -243,11 +266,22 @@ void ReadwiseLibraryActivity::selectTab(const int index) {
 void ReadwiseLibraryActivity::jumpToLocation(const int index) { selectTab(index); }
 
 const char* ReadwiseLibraryActivity::tabLabel(const int index) const {
+  // Six full labels do not fit a 480px portrait tab bar. The count lives in
+  // the label because TabIndicator is only an up/down sort arrow.
+  const bool compact = queuedCount > 0 && renderer.getScreenWidth() <= 480;
+  if (index == QUEUED_TAB) {
+    snprintf(queuedLabel, sizeof(queuedLabel), "%s %u",
+             compact ? tr(STR_READWISE_QUEUED_SHORT) : tr(STR_READWISE_QUEUED), static_cast<unsigned>(queuedCount));
+    return queuedLabel;
+  }
   if (index == LONG_TAB) {
-    return tr(STR_READWISE_LONG_READS);
+    return compact ? tr(STR_READWISE_TAB_LONG) : tr(STR_READWISE_LONG_READS);
   }
   if (index == QUICK_TAB) {
-    return tr(STR_READWISE_QUICK_READS);
+    return compact ? tr(STR_READWISE_TAB_QUICK) : tr(STR_READWISE_QUICK_READS);
+  }
+  if (compact && index == 1) {
+    return tr(STR_READWISE_TAB_SHORT);
   }
   if (index < 0 || index >= LOCATION_COUNT) {
     return "";
@@ -262,11 +296,12 @@ void ReadwiseLibraryActivity::onTabAction(const int index) {
 
 void ReadwiseLibraryActivity::stepTab(const int direction) {
   int next = locationIndex + (direction >= 0 ? 1 : -1);
-  if (next >= TAB_COUNT) {
+  const int count = tabCount();
+  if (next >= count) {
     next = 0;
   }
   if (next < 0) {
-    next = TAB_COUNT - 1;
+    next = count - 1;
   }
   selectTab(next);
 }
@@ -388,6 +423,19 @@ void ReadwiseLibraryActivity::activateIndex(const int index) {
   app.clearTapFlash();
   if (index == 0) {
     activityManager.pushActivity(std::make_unique<ReadwiseSyncActivity>(renderer, mappedInput));
+    return;
+  }
+  if (queuedTab()) {
+    const int docIndex = index - 1;
+    if (engine == nullptr || docIndex < 0 || docIndex >= static_cast<int>(queued.size())) {
+      return;
+    }
+    if (!engine->undoQueued(queued[static_cast<size_t>(docIndex)].id)) {
+      return;
+    }
+    engine->rebuildLocal();
+    reloadCounts();
+    requestUpdate();
     return;
   }
   const readwise::Document* doc = docAt(index - 1);
@@ -637,16 +685,35 @@ void ReadwiseLibraryActivity::applyShelfReturn() {
 }
 
 void ReadwiseLibraryActivity::queueMove(const readwise::Document& doc, const readwise::Location target) {
-  if (engine == nullptr) {
+  commitLocationChange(doc.id, target, doc.updatedAt);
+}
+
+void ReadwiseLibraryActivity::commitLocationChange(const char* id, const readwise::Location target,
+                                                   const char* remoteRev) {
+  if (engine == nullptr || id == nullptr) {
     return;
   }
-  if (!engine->queueLocationChange(doc.id, target, doc.updatedAt)) {
+  if (!engine->queueLocationChange(id, target, remoteRev)) {
     return;
   }
-  // Visible immediately: the document leaves the current index now, and the
-  // queued op pushes at the next sync.
+  // Archive rewrites docs.bin before the row disappears. Paint first, or the
+  // menu just vanishes and the list jumps.
+  if (target == readwise::Location::Archive) {
+    {
+      RenderLock lock(*this);
+      state = State::NOTICE;
+      statusMessage = tr(STR_READWISE_ARCHIVING);
+    }
+    requestUpdateAndWait();
+  }
   engine->rebuildLocal();
   reloadCounts();
+  {
+    RenderLock lock(*this);
+    if (state == State::NOTICE) {
+      state = State::LIST;
+    }
+  }
   requestUpdate();
 }
 
@@ -697,6 +764,18 @@ void ReadwiseLibraryActivity::provideRow(void* ctx, const uint16_t index, fui::L
   item.actionValue = static_cast<int16_t>(index);
   if (index == 0) {
     item.label = tr(STR_READWISE_SYNC_NOW);
+    return;
+  }
+  if (self->queuedTab()) {
+    // index 0 is the Sync row, already returned above, so this is never negative.
+    const int docIndex = static_cast<int>(index) - 1;
+    if (docIndex >= static_cast<int>(self->queued.size())) {
+      return;
+    }
+    const readwise::ReadwiseSyncEngine::QueuedDocument& row = self->queued[static_cast<size_t>(docIndex)];
+    item.label = row.title;
+    item.subtitle = row.author[0] != '\0' ? row.author : nullptr;
+    item.strikethrough = row.deleted;
     return;
   }
   const readwise::Document* doc = self->docAt(static_cast<int>(index) - 1);
@@ -755,7 +834,7 @@ void ReadwiseLibraryActivity::buildScreen(UiScreen& screen) {
 }
 
 void ReadwiseLibraryActivity::showEntryMenu(const int index) {
-  if (optionPopup.isActive() || index <= 0 || engine == nullptr) {
+  if (optionPopup.isActive() || index <= 0 || engine == nullptr || queuedTab()) {
     return;
   }
   const readwise::Document* doc = docAt(index - 1);
@@ -779,11 +858,7 @@ void ReadwiseLibraryActivity::showEntryMenu(const int index) {
     }
     switch (menuActions[selected]) {
       case ReadwiseUi::ReadwiseEntryAction::Archive:
-        if (engine->queueLocationChange(menuId, readwise::Location::Archive, menuRev)) {
-          engine->rebuildLocal();
-          reloadCounts();
-          requestUpdate();
-        }
+        commitLocationChange(menuId, readwise::Location::Archive, menuRev);
         break;
       case ReadwiseUi::ReadwiseEntryAction::Delete:
         confirmDelete();
@@ -819,12 +894,17 @@ void ReadwiseLibraryActivity::pushDelete() {
     LOG_ERR("RWLIB", "Could not queue delete");
     return;
   }
-  // Visible immediately, same as archive: the row leaves the list now, and
-  // the queued op pushes at the next sync (or the attempt below).
+  // The row leaves the list now. Paint before the docs.bin rewrite, which is
+  // the slow part the user would otherwise see as a frozen menu.
+  {
+    RenderLock lock(*this);
+    state = State::DELETING;
+  }
+  requestUpdateAndWait();
   engine->rebuildLocal();
   reloadCounts();
-  const bool online = READWISE_STORE.hasToken() && WiFi.status() == WL_CONNECTED &&
-                      WiFi.localIP() != IPAddress(0, 0, 0, 0);
+  const bool online =
+      READWISE_STORE.hasToken() && WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0);
   if (!online) {
     {
       RenderLock lock(*this);
@@ -834,12 +914,6 @@ void ReadwiseLibraryActivity::pushDelete() {
     requestUpdate();
     return;
   }
-
-  {
-    RenderLock lock(*this);
-    state = State::DELETING;
-  }
-  requestUpdateAndWait();
 
   readwise::HttpReadwiseApi api(READWISE_STORE.getToken());
   const readwise::PendingOp* op = engine->journal().findLatest(menuId, readwise::OpType::Delete);
