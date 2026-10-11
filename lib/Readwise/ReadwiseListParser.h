@@ -1,6 +1,6 @@
 #pragma once
 
-#include <StreamingJsonParser.h>
+#include <ChunkedJsonParser.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -109,7 +109,7 @@ class ReadwiseListParser {
 
   DocumentSink& documentSink;
   BodySink* bodySink;
-  StreamingJsonParser parser;
+  ChunkedJsonParser parser;
 
   Position position = Position::TOP_LEVEL;
   LastKey lastKey = LastKey::NONE;

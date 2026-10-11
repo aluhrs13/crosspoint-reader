@@ -5,10 +5,12 @@
 #include <Memory.h>
 #include <SecureHttpClient.h>
 
+#include <cstdio>
 #include <cstring>
 #include <utility>
 
 #include "ReadwiseClientCore.h"
+#include "ReadwiseHighlight.h"
 #include "ReadwiseListParser.h"
 
 namespace readwise {
@@ -49,6 +51,9 @@ void configureClient(freeink::SecureHttpClient& http, const std::string& token) 
   http.addHeader("Authorization", std::string("Token ") + token);
 }
 
+// First bytes of an error body. Enough for Readwise's `{"detail":...}`.
+constexpr size_t ERROR_SNIP_CAP = 80;
+
 uint16_t retryAfterFrom(const freeink::SecureHttpClient& http) {
   // SecureHttpClient lowercases header names on receipt and getHeader()
   // lowercases the lookup, so the server's lowercase "retry-after" is found
@@ -59,6 +64,23 @@ uint16_t retryAfterFrom(const freeink::SecureHttpClient& http) {
 }  // namespace
 
 HttpReadwiseApi::HttpReadwiseApi(std::string token) : token(std::move(token)) {}
+
+void HttpReadwiseApi::noteLocal(const char* text) {
+  snprintf(detail_, sizeof(detail_), "%s", text != nullptr ? text : "");
+  LOG_ERR("RWAPI", "%s", detail_);
+}
+
+void HttpReadwiseApi::noteHttpResult(int status, const char* body, size_t bodyLen) {
+  detail_[0] = '\0';
+  const ApiStatus mapped = statusFromHttp(status);
+  if (mapped == ApiStatus::Ok) {
+    return;
+  }
+  formatHttpDetail(status, body, bodyLen, detail_, sizeof(detail_));
+  if (mapped == ApiStatus::ServerError || mapped == ApiStatus::NotFound || mapped == ApiStatus::Rejected) {
+    LOG_ERR("RWAPI", "%s", detail_);
+  }
+}
 
 ApiStatus HttpReadwiseApi::checkAuth() {
   if (token.empty()) {
@@ -104,13 +126,26 @@ ApiStatus HttpReadwiseApi::runListRequest(const char* url, DocumentSink& docSink
   configureClient(http, token);
 
   ReadwiseListParser* parserPtr = parser.get();
-  const int status = http.GET([parserPtr](const uint8_t* data, size_t len) {
+  // Error bodies are small JSON. Keep a prefix so a 4xx/5xx can be shown;
+  // the success path streams into the parser and does not retain this.
+  char snip[ERROR_SNIP_CAP];
+  size_t snipLen = 0;
+  char* snipPtr = snip;
+  const int status = http.GET([parserPtr, snipPtr, &snipLen](const uint8_t* data, size_t len) {
+    if (snipLen + 1 < ERROR_SNIP_CAP) {
+      const size_t room = ERROR_SNIP_CAP - 1 - snipLen;
+      const size_t n = len < room ? len : room;
+      memcpy(snipPtr + snipLen, data, n);
+      snipLen += n;
+      snipPtr[snipLen] = '\0';
+    }
     // Returning false aborts the transfer as soon as parsing fails or a sink
     // says stop; no point paying for bytes nothing will consume.
     return parserPtr->feed(reinterpret_cast<const char*>(data), len);
   });
 
   LOG_DBG("RWAPI", "GET %s -> %d (heap %u)", url, status, (unsigned)ESP.getFreeHeap());
+  noteHttpResult(status, snip, snipLen);
 
   if (status == 429 && retryAfterSeconds != nullptr) {
     *retryAfterSeconds = retryAfterFrom(http);
@@ -163,14 +198,82 @@ ApiStatus HttpReadwiseApi::fetchBody(const char* id, BodySink& sink, uint16_t* r
   return runListRequest(url, discard, &sink, nullptr, retryAfterSeconds);
 }
 
+ApiStatus HttpReadwiseApi::pushHighlight(const char* text, const char* title, const char* author,
+                                         const char* sourceUrl) {
+  detail_[0] = '\0';
+  if (token.empty()) {
+    return ApiStatus::NoCredentials;
+  }
+  if (text == nullptr || text[0] == '\0') {
+    noteLocal("empty highlight");
+    return ApiStatus::ServerError;
+  }
+  // Escaping can double the quote, title, author, and URL. 2 KB covers that
+  // plus the JSON keys; the quote itself is capped at 280 bytes.
+  constexpr size_t kBodyCap = 2048;
+  auto body = makeUniqueNoThrow<char[]>(kBodyCap);
+  if (!body) {
+    LOG_ERR("RWAPI", "OOM: highlight body");
+    return ApiStatus::LowMemory;
+  }
+  if (!buildHighlightBody(text, title, author, sourceUrl, body.get(), kBodyCap)) {
+    noteLocal("highlight body too large");
+    return ApiStatus::ServerError;
+  }
+  if (insufficientHeap()) {
+    return ApiStatus::LowMemory;
+  }
+  freeink::SecureHttpClient http;
+  if (!http.begin(HIGHLIGHTS_URL)) {
+    return ApiStatus::NetworkError;
+  }
+  configureClient(http, token);
+  http.addHeader("Content-Type", "application/json");
+  const int status = http.sendRequest("POST", body.get());
+  // getString() is std::string on device and Arduino String in the simulator.
+  // Both expose c_str() and length(). The temporary lives for this call.
+  noteHttpResult(status, http.getString().c_str(), http.getString().length());
+  http.end();
+  LOG_DBG("RWAPI", "POST highlight -> %d", status);
+  return statusFromHttp(status);
+}
+
 ApiStatus HttpReadwiseApi::pushOp(const PendingOp& op) {
+  detail_[0] = '\0';
   if (token.empty()) {
     return ApiStatus::NoCredentials;
   }
   char url[URL_CAP];
+  if (op.op == OpType::Delete) {
+    if (!buildDeleteUrl(op.id, url, sizeof(url))) {
+      noteLocal("unpushable delete");
+      return ApiStatus::ServerError;
+    }
+    if (insufficientHeap()) {
+      return ApiStatus::LowMemory;
+    }
+    freeink::SecureHttpClient http;
+    if (!http.begin(url)) {
+      return ApiStatus::NetworkError;
+    }
+    configureClient(http, token);
+    const int status = http.sendRequest("DELETE", "");
+    if (status != 404) {
+      noteHttpResult(status, http.getString().c_str(), http.getString().length());
+    }
+    http.end();
+    LOG_DBG("RWAPI", "DELETE %s -> %d", url, status);
+    // A repeated delete of a document the server already removed. Treating it
+    // as success lets the journal entry drain instead of stalling the queue.
+    if (status == 404) {
+      return ApiStatus::Ok;
+    }
+    return statusFromHttp(status);
+  }
+
   char body[64];
   if (!buildUpdateUrl(op.id, url, sizeof(url)) || !buildUpdateBody(op, body, sizeof(body))) {
-    LOG_ERR("RWAPI", "Unpushable op %u for %s", static_cast<unsigned>(op.op), op.id);
+    noteLocal("unpushable update");
     return ApiStatus::ServerError;
   }
   if (insufficientHeap()) {
@@ -184,6 +287,7 @@ ApiStatus HttpReadwiseApi::pushOp(const PendingOp& op) {
   configureClient(http, token);
   http.addHeader("Content-Type", "application/json");
   const int status = http.sendRequest("PATCH", body);
+  noteHttpResult(status, http.getString().c_str(), http.getString().length());
   http.end();
 
   LOG_DBG("RWAPI", "PATCH %s -> %d", url, status);

@@ -28,7 +28,16 @@ enum class ApiStatus : uint8_t {
   RateLimited,
   LowMemory,
   ParseError,
+  // HTTP 5xx. Retry on the next sync.
   ServerError,
+  // A queued update whose document is already gone. Delete treats 404 as
+  // success before this mapping; PATCH surfaces it so the sync can ask
+  // whether to drop that one op. A highlight POST that answers 404 is a
+  // permanent reject for that quote only.
+  NotFound,
+  // HTTP 4xx other than auth, rate-limit, and 404. The request will not
+  // succeed on retry, so the caller must skip it and continue.
+  Rejected,
 };
 
 const char* apiStatusName(ApiStatus status);
@@ -85,9 +94,14 @@ class ReadwiseApi {
   // Fetches one page and streams its documents to `sink`.
   virtual ListResponse fetchPage(const ListQuery& query, DocumentSink& sink) = 0;
 
-  // Applies one pending operation. Only SetLocation and SetSeen are ever
-  // queued: PATCH /update/ answers 200 for reading_progress and silently
-  // discards it, so progress is never pushed.
+  // Posts one quote to the Readwise highlight library (POST /api/v2/highlights/),
+  // using the same token as the Reader calls. A repeat of the same text, title,
+  // author, and source URL is a no-op on the server.
+  virtual ApiStatus pushHighlight(const char* text, const char* title, const char* author, const char* sourceUrl) = 0;
+
+  // Applies one pending operation. SetLocation and SetSeen are PATCH /update/.
+  // Delete is DELETE /delete/. PATCH answers 200 for reading_progress and
+  // silently discards it, so progress is never pushed.
   //
   // Note that a 200 is not evidence a field was written -- the endpoint returns
   // 200 for fields it ignores -- so an implementation that needs certainty must
@@ -99,6 +113,10 @@ class ReadwiseApi {
   // on-demand as the retry path when a document is opened. `retryAfterSeconds`
   // is set on RateLimited.
   virtual ApiStatus fetchBody(const char* id, BodySink& sink, uint16_t* retryAfterSeconds) = 0;
+
+  // Trace of the most recent failed call, or empty. Valid until the next call.
+  // The HTTP client fills this with the status and a short response snippet.
+  virtual const char* lastDetail() const { return ""; }
 };
 
 }  // namespace readwise

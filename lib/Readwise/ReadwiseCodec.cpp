@@ -198,7 +198,7 @@ bool decodeJournalEntry(const uint8_t* in, size_t len, PendingOp& op) {
               strnlen(reinterpret_cast<const char*>(in + offset), ID_CAP - 1));
   offset += ID_CAP;
   const uint8_t rawOp = in[offset++];
-  if (rawOp > static_cast<uint8_t>(OpType::SetSeen)) {
+  if (rawOp > static_cast<uint8_t>(OpType::Delete)) {
     return false;
   }
   op.op = static_cast<OpType>(rawOp);

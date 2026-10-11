@@ -62,14 +62,17 @@ void encodeIndexEntry(uint16_t recordIndex, uint8_t* out);
 uint16_t decodeIndexEntry(const uint8_t* in);
 
 // --- journal.bin ----------------------------------------------------------
-// Operations are limited to the two the API actually honours. Phase 1 proved
+// Operations are limited to the ones the API actually honours. Phase 1 proved
 // reading_progress is silently discarded by PATCH /update/, so progress is never
-// queued for push; it is local-only state.
+// queued for push; it is local-only state. Delete is DELETE /delete/, not a
+// PATCH field. A note is not an operation: the journal entry cannot hold the
+// text, and the notes field has never been shown to round-trip.
 //
 // Persisted by index -- append new values at the end only.
 enum class OpType : uint8_t {
   SetLocation = 0,
   SetSeen = 1,
+  Delete = 2,
 };
 
 // Fixed-width entries are the append-safety mechanism: a load reads
@@ -84,7 +87,7 @@ struct PendingOp {
   uint32_t seq = 0;
   char id[ID_CAP] = {};
   OpType op = OpType::SetLocation;
-  // For SetLocation, the target Location. For SetSeen, 0 or 1.
+  // For SetLocation, the target Location. For SetSeen, 0 or 1. Unused for Delete.
   uint8_t payload = 0;
   // The document's updated_at when this op was queued, used to detect that the
   // document changed remotely in the meantime.

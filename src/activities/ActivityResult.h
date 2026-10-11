@@ -67,9 +67,17 @@ struct FilePathResult {
   std::string path;
 };
 
-using ResultVariant =
-    std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
-                 PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult, FilePathResult>;
+// Returned by the Readwise preamble when the entry menu did something other
+// than open the article. `author` is set for FilterAuthor.
+struct ReadwisePreambleResult {
+  enum class Action : uint8_t { Open = 0, Archive, Delete, FilterAuthor };
+  Action action = Action::Open;
+  char author[65] = {};
+};
+
+using ResultVariant = std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult,
+                                   IntervalResult, PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult,
+                                   FilePathResult, ReadwisePreambleResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

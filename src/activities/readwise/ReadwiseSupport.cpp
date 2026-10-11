@@ -90,8 +90,45 @@ StrId statusStrId(readwise::ApiStatus status) {
       return StrId::STR_READWISE_PARSE_ERROR;
     case readwise::ApiStatus::ServerError:
       return StrId::STR_READWISE_SERVER_ERROR;
+    case readwise::ApiStatus::NotFound:
+      return StrId::STR_READWISE_NOT_ON_SERVER;
+    case readwise::ApiStatus::Rejected:
+      return StrId::STR_READWISE_REJECTED;
   }
   return StrId::STR_READWISE_SYNC_FAILED;
+}
+
+uint8_t fillReadwiseEntryMenu(const char* author, const char** labels, ReadwiseEntryAction* actions, uint8_t cap) {
+  if (labels == nullptr || actions == nullptr || cap < 3) {
+    return 0;
+  }
+  uint8_t count = 0;
+  labels[count] = tr(STR_READWISE_ARCHIVE);
+  actions[count++] = ReadwiseEntryAction::Archive;
+  labels[count] = tr(STR_DELETE);
+  actions[count++] = ReadwiseEntryAction::Delete;
+  labels[count] = tr(STR_READWISE_COMMENT);
+  actions[count++] = ReadwiseEntryAction::Comment;
+  if (author != nullptr && author[0] != '\0' && count < cap) {
+    labels[count] = tr(STR_READWISE_MORE_AUTHOR);
+    actions[count++] = ReadwiseEntryAction::Author;
+  }
+  return count;
+}
+
+namespace {
+ShelfReturn& shelfReturnSlot() {
+  static ShelfReturn slot;
+  return slot;
+}
+}  // namespace
+
+void queueShelfReturn(const ShelfReturn& request) { shelfReturnSlot() = request; }
+
+ShelfReturn takeShelfReturn() {
+  ShelfReturn out = shelfReturnSlot();
+  shelfReturnSlot() = {};
+  return out;
 }
 
 }  // namespace ReadwiseUi

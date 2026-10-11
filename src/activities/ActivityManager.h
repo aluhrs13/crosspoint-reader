@@ -17,7 +17,7 @@
 class Activity;    // forward declaration
 class RenderLock;  // forward declaration
 
-enum class HomeMenuItem { NONE, FILE_BROWSER, RECENTS, OPDS_BROWSER, READWISE, FILE_TRANSFER, SETTINGS_MENU };
+enum class HomeMenuItem { NONE, FILE_BROWSER, LIBRARY, OPDS_BROWSER, READWISE, FILE_TRANSFER, SETTINGS_MENU };
 
 /**
  * ActivityManager
@@ -66,7 +66,7 @@ class ActivityManager {
   // This variable must only be set by the main loop, to avoid race conditions
   std::atomic<bool> requestedUpdate{false};
 
-  // Set by activities after long blocking work; cleared when the main loop reads it
+  // Set by activities after long blocking work; cleared when the main loop reads it.
   std::atomic<bool> blockingWorkFinished{false};
 
  public:
@@ -85,17 +85,20 @@ class ActivityManager {
 
   // goTo... functions are convenient wrapper for replaceActivity()
   void goToFileTransfer();
+  void goToJoinNetwork();  // File Transfer straight into Join Network (post heap-defrag reboot)
+  void goToUsbDrive();
   void goToSettings();
   void goToFileBrowser(std::string path = {});
-  void goToRecentBooks();
+  void goToLibrary();
   void goToBrowser();
+  void goToPlugins(bool showOpds);
   void goToReadwiseLibrary();
   void goToReader(std::string path, bool allowFastInitialRefresh = false);
   void goToSleep(bool fromTimeout = false);
   void goToBoot();
   void goToFullScreenMessage(std::string message, EpdFontFamily::Style style = EpdFontFamily::REGULAR);
   void goToCrashReport();
-  void goHome(HomeMenuItem initialMenuItem = HomeMenuItem::NONE);
+  void goHome(HomeMenuItem initialMenuItem = HomeMenuItem::NONE, bool cleanInitialRefresh = false);
 
   // This will move current activity to stack instead of deleting it
   void pushActivity(std::unique_ptr<Activity>&& activity);
@@ -112,10 +115,12 @@ class ActivityManager {
   bool consumeBlockingWorkFinished() { return blockingWorkFinished.exchange(false, std::memory_order_relaxed); }
 
   bool preventAutoSleep() const;
+  bool requiresExclusiveStorageLoop() const;
   bool isReaderActivity() const;
   bool handleForcedRefresh();
   bool skipLoopDelay() const;
   ScreenshotInfo getScreenshotInfo() const;
+  void prepareForSleep();
 
   // If immediate is true, the update will be triggered immediately.
   // Otherwise, it will be deferred until the end of the current loop iteration.

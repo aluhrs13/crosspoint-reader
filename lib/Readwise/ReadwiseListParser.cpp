@@ -16,8 +16,8 @@ bool keyIs(const char* key, size_t len, const char* literal) {
 ReadwiseListParser::ReadwiseListParser(DocumentSink& documents, BodySink* body)
     : documentSink(documents),
       bodySink(body),
-      parser(JsonCallbacks{this, &sOnKey, nullptr, &sOnNumber, &sOnBool, &sOnNull, &sOnObjectStart, &sOnObjectEnd,
-                           &sOnArrayStart, &sOnArrayEnd, &sOnStringChunk, &sOnStringEnd}) {
+      parser(ChunkedJsonCallbacks{this, &sOnKey, nullptr, &sOnNumber, &sOnBool, &sOnNull, &sOnObjectStart,
+                                  &sOnObjectEnd, &sOnArrayStart, &sOnArrayEnd, &sOnStringChunk, &sOnStringEnd}) {
   reset();
 }
 

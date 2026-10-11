@@ -17,6 +17,9 @@ class NullReadwiseApi : public ReadwiseApi {
     response.status = ApiStatus::NetworkError;
     return response;
   }
+  ApiStatus pushHighlight(const char*, const char*, const char*, const char*) override {
+    return ApiStatus::NetworkError;
+  }
   ApiStatus pushOp(const PendingOp&) override { return ApiStatus::NetworkError; }
   ApiStatus fetchBody(const char*, BodySink&, uint16_t*) override { return ApiStatus::NetworkError; }
 };

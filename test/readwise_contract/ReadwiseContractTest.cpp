@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 
-#include "lib/JsonParser/StreamingJsonParser.h"
+#include "lib/JsonParser/ChunkedJsonParser.h"
 
 #ifndef READWISE_FIXTURES_DIR
 #error "READWISE_FIXTURES_DIR must be defined by the build"
@@ -71,8 +71,9 @@ void onObjectEnd(void* ctx) { static_cast<Recorder*>(ctx)->events.push_back({Eve
 void onArrayStart(void* ctx) { static_cast<Recorder*>(ctx)->events.push_back({EventType::ARRAY_START, {}}); }
 void onArrayEnd(void* ctx) { static_cast<Recorder*>(ctx)->events.push_back({EventType::ARRAY_END, {}}); }
 
-JsonCallbacks makeCallbacks(Recorder* ctx) {
-  return {ctx, onKey, onString, onNumber, onBool, onNull, onObjectStart, onObjectEnd, onArrayStart, onArrayEnd};
+ChunkedJsonCallbacks makeCallbacks(Recorder* ctx) {
+  return {ctx,           onKey,       onString,     onNumber,   onBool,  onNull,
+          onObjectStart, onObjectEnd, onArrayStart, onArrayEnd, nullptr, nullptr};
 }
 
 std::string loadFixture(const std::string& name) {
@@ -88,7 +89,7 @@ std::string loadFixture(const std::string& name) {
 // callback, which delivers arbitrary TLS record-sized fragments.
 std::vector<Event> parseChunked(const std::string& json, size_t chunkSize, bool* errorOut = nullptr) {
   Recorder recorder;
-  StreamingJsonParser parser(makeCallbacks(&recorder));
+  ChunkedJsonParser parser(makeCallbacks(&recorder));
   for (size_t offset = 0; offset < json.size(); offset += chunkSize) {
     const size_t len = std::min(chunkSize, json.size() - offset);
     parser.feed(json.data() + offset, len);

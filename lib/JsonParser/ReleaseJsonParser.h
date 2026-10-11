@@ -1,22 +1,22 @@
 #pragma once
 
+#include <StreamingJsonParser.h>
+
 #include <cstddef>
 #include <cstdint>
 
-#include "StreamingJsonParser.h"
-
 class ReleaseJsonParser {
  public:
-  // assetName selects which release asset counts as the firmware image; it must
-  // outlive the parser (callers pass a string literal). Firmware variants each
-  // publish their own asset, so the caller decides which one to look for.
-  explicit ReleaseJsonParser(const char* assetName = "firmware.bin");
+  ReleaseJsonParser();
 
   ReleaseJsonParser(const ReleaseJsonParser&) = delete;
   ReleaseJsonParser& operator=(const ReleaseJsonParser&) = delete;
 
   void reset();
   void feed(const char* data, size_t len);
+
+  // Release-asset filename to match (default "firmware.bin").
+  void setFirmwareAssetName(const char* name);
 
   bool foundTag() const;
   bool foundFirmware() const;
@@ -54,8 +54,6 @@ class ReleaseJsonParser {
 
   StreamingJsonParser parser;
 
-  const char* firmwareAssetName;
-
   Position position;
   LastKey lastKey;
   uint8_t depth;
@@ -67,7 +65,9 @@ class ReleaseJsonParser {
   bool tagFound;
   bool firmwareFound;
 
-  char currentAssetName[32];
+  char currentAssetName[48];
   char currentAssetUrl[512];
   size_t currentAssetSize;
+
+  char firmwareAssetName[48];
 };

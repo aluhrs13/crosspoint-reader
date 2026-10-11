@@ -8,11 +8,13 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 
 #include "FakeReadwise.h"
 #include "lib/Readwise/ReadwiseClientCore.h"
+#include "lib/Readwise/ReadwiseHighlight.h"
 
 namespace {
 
@@ -98,8 +100,29 @@ TEST(ReadwiseClientCore, StatusMapping) {
   EXPECT_EQ(statusFromHttp(403), ApiStatus::AuthFailed);
   EXPECT_EQ(statusFromHttp(429), ApiStatus::RateLimited);
   EXPECT_EQ(statusFromHttp(500), ApiStatus::ServerError);
-  EXPECT_EQ(statusFromHttp(400), ApiStatus::ServerError);
+  EXPECT_EQ(statusFromHttp(503), ApiStatus::ServerError);
+  EXPECT_EQ(statusFromHttp(400), ApiStatus::Rejected);
+  EXPECT_EQ(statusFromHttp(422), ApiStatus::Rejected);
+  EXPECT_EQ(statusFromHttp(404), ApiStatus::NotFound);
   EXPECT_EQ(statusFromHttp(-1), ApiStatus::NetworkError);
+}
+
+TEST(ReadwiseClientCore, HttpDetailKeepsAShortServerTrace) {
+  char out[80];
+  const char* body = "{\"detail\":\"bad\nid\"}\n";
+  formatHttpDetail(400, body, strlen(body), out, sizeof(out));
+  EXPECT_STREQ(out, "HTTP 400 {\"detail\":\"bad id\"}");
+
+  formatHttpDetail(500, nullptr, 0, out, sizeof(out));
+  EXPECT_STREQ(out, "HTTP 500");
+
+  formatHttpDetail(-1, "ignored", 7, out, sizeof(out));
+  EXPECT_STREQ(out, "transport");
+
+  char tiny[12];
+  formatHttpDetail(400, "{\"detail\":\"long\"}", 16, tiny, sizeof(tiny));
+  EXPECT_EQ(strlen(tiny), sizeof(tiny) - 1);
+  EXPECT_EQ(tiny[sizeof(tiny) - 1], '\0');
 }
 
 TEST(ReadwiseClientCore, RetryAfterParsing) {
@@ -111,6 +134,39 @@ TEST(ReadwiseClientCore, RetryAfterParsing) {
   EXPECT_EQ(parseRetryAfter("999999"), 0) << "an implausible value reads as no guidance";
   EXPECT_EQ(parseRetryAfter("16junk"), 0) << "trailing junk means the value cannot be trusted";
   EXPECT_EQ(parseRetryAfter("16 "), 0);
+}
+
+TEST(ReadwiseHighlight, BodyEscapesAndNamesTheSource) {
+  char body[512];
+  ASSERT_TRUE(buildHighlightBody("say \"hello\"\n", "How to Do What You Love", "Paul Graham",
+                                 "http://www.paulgraham.com/love.html", body, sizeof(body)));
+  char expected[512];
+  snprintf(expected, sizeof(expected),
+           "{\"highlights\":[{\"text\":\"say \\\"hello\\\"\\n\",\"title\":\"How to Do What You Love\","
+           "\"author\":\"Paul Graham\",\"source_url\":\"http://www.paulgraham.com/love.html\","
+           "\"source_type\":\"crosspoint\",\"category\":\"articles\",\"note\":\".%s\"}]}",
+           HIGHLIGHT_INLINE_TAG);
+  EXPECT_STREQ(body, expected);
+}
+
+TEST(ReadwiseHighlight, BodyOmitsEmptyMetadata) {
+  char body[256];
+  ASSERT_TRUE(buildHighlightBody("Just the quote", "", nullptr, "", body, sizeof(body)));
+  char expected[256];
+  snprintf(expected, sizeof(expected),
+           "{\"highlights\":[{\"text\":\"Just the quote\",\"source_type\":\"crosspoint\","
+           "\"category\":\"articles\",\"note\":\".%s\"}]}",
+           HIGHLIGHT_INLINE_TAG);
+  EXPECT_STREQ(body, expected);
+}
+
+TEST(ReadwiseHighlight, FitCutsOnAWordBoundary) {
+  char text[64];
+  memset(text, 'a', sizeof(text) - 1);
+  text[sizeof(text) - 1] = '\0';
+  text[4] = ' ';
+  ASSERT_TRUE(fitHighlightText(text, 8));
+  EXPECT_STREQ(text, "aaaa");
 }
 
 TEST(ReadwiseClientCore, DocumentIdValidation) {

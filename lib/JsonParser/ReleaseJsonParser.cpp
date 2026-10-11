@@ -13,11 +13,15 @@ void safeCopy(char* dst, size_t dstSize, const char* src, size_t srcLen) {
 
 }  // namespace
 
-ReleaseJsonParser::ReleaseJsonParser(const char* assetName)
+ReleaseJsonParser::ReleaseJsonParser()
     : parser(JsonCallbacks{this, sOnKey, sOnString, sOnNumber, sOnBool, sOnNull, sOnObjectStart, sOnObjectEnd,
-                           sOnArrayStart, sOnArrayEnd}),
-      firmwareAssetName(assetName) {
+                           sOnArrayStart, sOnArrayEnd}) {
+  safeCopy(firmwareAssetName, sizeof(firmwareAssetName), "firmware.bin", sizeof("firmware.bin") - 1);
   reset();
+}
+
+void ReleaseJsonParser::setFirmwareAssetName(const char* name) {
+  safeCopy(firmwareAssetName, sizeof(firmwareAssetName), name, strlen(name));
 }
 
 void ReleaseJsonParser::reset() {

@@ -3,25 +3,32 @@
 #include <vector>
 
 #include "./FileBrowserActivity.h"
+#include "RecentBooksStore.h"
 #include "activities/Activity.h"
+#include "components/CoverGridHomeUi.h"
 #include "util/ButtonNavigator.h"
 
-struct RecentBook;
 struct Rect;
 
 class HomeActivity final : public Activity {
+  std::unique_ptr<CoverGridHomeUi> coverGridUi;
   ButtonNavigator buttonNavigator;
   int selectorIndex = 0;
   bool recentsLoading = false;
   bool recentsLoaded = false;
   bool firstRenderDone = false;
+  // Paint a Loading popup over the menu: the Readwise library reads and
+  // rebuilds its SD indexes in onEnter, which blocks before its first frame.
+  bool openingReadwise = false;
   bool hasOpdsServers = false;
+  bool hasPlugins = false;
   bool hasReadwise = false;
+  // The home "library" slot (index 2) shows Plugins when any plugin is
+  // installed, otherwise OPDS. The index converters gate on its presence.
+  bool hasLibrarySlot() const { return hasPlugins || hasOpdsServers; }
+  bool hasContinueReading = false;
   bool coverRendered = false;      // Track if cover has been rendered once
   bool coverBufferStored = false;  // Track if cover buffer is stored
-  // Home can be entered while Back is still held (e.g. leaving Settings with
-  // Back): ignore that stale release until a fresh press is seen here.
-  bool backPressSeen = false;
   uint8_t* coverBuffer = nullptr;  // HomeActivity's own buffer for cover image
   size_t coverBufferSize = 0;      // Bytes allocated to coverBuffer
   // Logical rect last passed to drawRecentBookCover. The cover snapshot only
@@ -33,16 +40,17 @@ class HomeActivity final : public Activity {
   int coverRectH = 0;
   std::vector<RecentBook> recentBooks;
   const HomeMenuItem initialMenuItem;
+  const bool cleanInitialRefresh;
 
   // Convert HomeMenuItem to menu index (used in onEnter)
-  static int menuItemToIndex(HomeMenuItem item, bool hasOpdsUrl, bool hasReadwise) {
+  static int menuItemToIndex(HomeMenuItem item, bool hasLibrarySlot, bool hasReadwise) {
     int i = 0;
     if (item == HomeMenuItem::FILE_BROWSER) return i;
     ++i;
-    if (item == HomeMenuItem::RECENTS) return i;
+    if (item == HomeMenuItem::LIBRARY) return i;
     ++i;
-    if (item == HomeMenuItem::OPDS_BROWSER) return hasOpdsUrl ? i : 0;
-    if (hasOpdsUrl) ++i;
+    if (item == HomeMenuItem::OPDS_BROWSER) return hasLibrarySlot ? i : 0;
+    if (hasLibrarySlot) ++i;
     if (item == HomeMenuItem::READWISE) return hasReadwise ? i : 0;
     if (hasReadwise) ++i;
     if (item == HomeMenuItem::FILE_TRANSFER) return i;
@@ -52,11 +60,11 @@ class HomeActivity final : public Activity {
   }
 
   // Convert menu index to HomeMenuItem (used in loop)
-  static HomeMenuItem indexToMenuItem(int idx, bool hasOpdsUrl, bool hasReadwise) {
+  static HomeMenuItem indexToMenuItem(int idx, bool hasLibrarySlot, bool hasReadwise) {
     int i = 0;
     if (idx == i++) return HomeMenuItem::FILE_BROWSER;
-    if (idx == i++) return HomeMenuItem::RECENTS;
-    if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
+    if (idx == i++) return HomeMenuItem::LIBRARY;
+    if (hasLibrarySlot && idx == i++) return HomeMenuItem::OPDS_BROWSER;
     if (hasReadwise && idx == i++) return HomeMenuItem::READWISE;
     if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
     if (idx == i) return HomeMenuItem::SETTINGS_MENU;
@@ -64,10 +72,11 @@ class HomeActivity final : public Activity {
   }
   void onSelectBook(const std::string& path);
   void onFileBrowserOpen();
-  void onRecentsOpen();
+  void onLibraryOpen();
   void onSettingsOpen();
   void onFileTransferOpen();
   void onOpdsBrowserOpen();
+  void onPluginsOpen();
   void onReadwiseOpen();
 
   int getMenuItemCount() const;
@@ -76,11 +85,16 @@ class HomeActivity final : public Activity {
   void freeCoverBuffer();     // Free the stored cover buffer
   void loadRecentBooks(int maxBooks);
   void loadRecentCovers(int coverHeight);
+  void fillCoverGridFromLibrary();
+  void resolveGridCoverPaths();
+  void loadGridCover(RecentBook& book, int height, bool& showingLoading, Rect& popupRect);
 
  public:
   explicit HomeActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                        HomeMenuItem initialMenuItemValue = HomeMenuItem::NONE)
-      : Activity("Home", renderer, mappedInput), initialMenuItem(initialMenuItemValue) {}
+                        HomeMenuItem initialMenuItemValue = HomeMenuItem::NONE, bool cleanInitialRefresh = false)
+      : Activity("Home", renderer, mappedInput),
+        initialMenuItem(initialMenuItemValue),
+        cleanInitialRefresh(cleanInitialRefresh) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;

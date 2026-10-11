@@ -22,11 +22,12 @@ add_executable(ReadwiseClientTest
   ArticleXhtmlWriterTest.cpp
   ArticleImageUrlTest.cpp
   ReadwiseListParserTest.cpp
-  ${REPO_ROOT}/lib/JsonParser/StreamingJsonParser.cpp
+  ${REPO_ROOT}/lib/JsonParser/ChunkedJsonParser.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseDocument.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseCodec.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseListParser.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseClientCore.cpp
+  ${REPO_ROOT}/lib/Readwise/ReadwiseHighlight.cpp
   ${REPO_ROOT}/lib/Readwise/HtmlTokenizer.cpp
   ${REPO_ROOT}/lib/Readwise/ArticleImageUrl.cpp
   ${REPO_ROOT}/lib/Readwise/ArticleXhtmlWriter.cpp

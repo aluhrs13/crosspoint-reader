@@ -110,6 +110,19 @@ bool buildUpdateUrl(const char* id, char* out, size_t outCap) {
   return true;
 }
 
+bool buildDeleteUrl(const char* id, char* out, size_t outCap) {
+  if (id == nullptr || id[0] == '\0') {
+    return false;
+  }
+  size_t pos = 0;
+  if (!appendLiteral(out, outCap, pos, API_BASE) || !appendLiteral(out, outCap, pos, "/delete/") ||
+      !appendEncoded(out, outCap, pos, id) || !appendLiteral(out, outCap, pos, "/")) {
+    return false;
+  }
+  out[pos] = '\0';
+  return true;
+}
+
 bool buildUpdateBody(const PendingOp& op, char* out, size_t outCap) {
   if (op.op == OpType::SetSeen) {
     const int written = snprintf(out, outCap, "{\"seen\":%s}", op.payload != 0 ? "true" : "false");
@@ -142,7 +155,53 @@ ApiStatus statusFromHttp(int httpStatus) {
   if (httpStatus == 429) {
     return ApiStatus::RateLimited;
   }
+  if (httpStatus == 404) {
+    return ApiStatus::NotFound;
+  }
+  // A client error will not succeed by retrying the same body. 5xx stays
+  // ServerError so a transient fault is tried again on the next sync.
+  if (httpStatus >= 400 && httpStatus < 500) {
+    return ApiStatus::Rejected;
+  }
   return ApiStatus::ServerError;
+}
+
+void formatHttpDetail(int httpStatus, const char* body, size_t bodyLen, char* out, size_t outCap) {
+  if (out == nullptr || outCap == 0) {
+    return;
+  }
+  out[0] = '\0';
+  if (httpStatus < 0) {
+    snprintf(out, outCap, "transport");
+    return;
+  }
+  const int wrote = snprintf(out, outCap, "HTTP %d", httpStatus);
+  if (wrote < 0 || body == nullptr || bodyLen == 0) {
+    return;
+  }
+  size_t pos = static_cast<size_t>(wrote);
+  if (pos + 1 >= outCap) {
+    out[outCap - 1] = '\0';
+    return;
+  }
+  out[pos++] = ' ';
+  bool spaced = true;
+  for (size_t i = 0; i < bodyLen && pos + 1 < outCap; ++i) {
+    const unsigned char c = static_cast<unsigned char>(body[i]);
+    if (c <= ' ') {
+      if (!spaced) {
+        out[pos++] = ' ';
+        spaced = true;
+      }
+      continue;
+    }
+    out[pos++] = static_cast<char>(c);
+    spaced = false;
+  }
+  while (pos > 0 && out[pos - 1] == ' ') {
+    --pos;
+  }
+  out[pos] = '\0';
 }
 
 uint16_t parseRetryAfter(const char* headerValue) {

@@ -4,6 +4,7 @@
 #include <GfxRenderer.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <MemoryManager.h>
 #include <Serialization.h>
 
 #include <cstring>
@@ -41,8 +42,8 @@ void TextBlock::bindArenaPointers() {
 TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<int16_t>& wordXpos,
                      const std::vector<EpdFontFamily::Style>& wordStyles, const std::vector<uint8_t>& focusBoundary,
                      const std::vector<uint16_t>& focusSuffixX, const BlockStyle& blockStyle,
-                     std::vector<std::string> rubyTexts)
-    : blockStyle(blockStyle), rubyTexts(std::move(rubyTexts)) {
+                     std::vector<std::string> rubyTexts, std::vector<LinkSpan> linkSpans)
+    : blockStyle(blockStyle), rubyTexts(std::move(rubyTexts)), linkSpans(std::move(linkSpans)) {
   // Same invariant as deserialize(): a block never holds an all-empty rubyTexts, so a
   // ruby-less line costs nothing beyond its arena. The layout engine hands one over for
   // every line it extracts, ruby or not; release it here rather than carrying it for the
@@ -85,6 +86,12 @@ TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<in
 
   const size_t size = arenaSize(numWords, focusPresent, textBytes);
   arena = makeUniqueNoThrow<uint8_t[]>(size);
+  if (!arena) {
+    // Evict rebuildable caches (SD-font mini data, render glyph cache) and
+    // retry once before declaring the line lost.
+    freeink::MemoryManager::instance().ensureFree(size + 4 * 1024);
+    arena = makeUniqueNoThrow<uint8_t[]>(size);
+  }
   if (!arena) {
     LOG_ERR("TXB", "OOM: arena %u bytes", static_cast<uint32_t>(size));
     numWords = 0;
@@ -131,90 +138,37 @@ void TextBlock::render(const GfxRenderer& renderer, const int fontId, const int 
     LOG_ERR("TXB", "Render skipped: invalid block");
     return;
   }
+  const int8_t tracking = blockStyle.characterSpacing;
 
   const bool scanning = renderer.isFontCacheScanning();
   const int ascender = renderer.getFontAscenderSize(fontId);
 
-  // Resolve ruby collisions left-to-right to prevent adjacent ruby texts from overlapping
+  // Resolve ruby positions. Layout (extractLine) has already reserved extraStartOffset on the
+  // left and extraEndOffset on the right, so the centered rubyX is always within the page margins.
   struct RubyDrawInfo {
     int x;
-    int width;
     std::string text;
     BidiUtils::BidiBaseDir baseDir;
   };
-  // hasRuby() is an O(numWords) scan, so resolve it once here rather than per word.
-  // Both arrays below are only ever read when the line carries ruby, so they stay
-  // empty (zero allocations) for the ruby-less case, which is every line of a
-  // non-CJK book. Sized lazily inside the branch.
   const bool blockHasRuby = hasRuby();
-  std::vector<int> wordShiftArr;
   std::vector<RubyDrawInfo> rubies;
   if (blockHasRuby) {
-    wordShiftArr.assign(numWords, 0);
     rubies.resize(numWords);
-    int accumulatedShift = 0;
-    int lastEnd = -9999;
     for (uint16_t i = 0; i < numWords; i++) {
-      wordShiftArr[i] = accumulatedShift;
       if (i < rubyTexts.size() && !rubyTexts[i].empty() && (wordStyle(i) & EpdFontFamily::RUBY_CONTINUE) == 0) {
-        // Find the group size (how many words are part of this ruby annotation)
         int groupWordCount = 1;
         while (i + groupWordCount < numWords && (wordStyle(i + groupWordCount) & EpdFontFamily::RUBY_CONTINUE) != 0) {
           groupWordCount++;
         }
-
-        // Compute actual width for the group
         int groupActualWidth = 0;
         for (int k = 0; k < groupWordCount; ++k) {
-          groupActualWidth += renderer.getTextAdvanceX(fontId, wordText(i + k), wordStyle(i + k));
+          groupActualWidth += renderer.getTextAdvanceX(fontId, wordText(i + k), wordStyle(i + k), tracking);
         }
-
-        const char* word = wordText(i);
+        const int rubyWidth = renderer.getTextAdvanceX(fontId, rubyTexts[i].c_str(), EpdFontFamily::SUP, tracking);
         const int leaderWordX = xposArr[i] + x;
-        const int leaderWordX_shifted = leaderWordX + accumulatedShift;
         const auto baseDir =
-            static_cast<BidiUtils::BidiBaseDir>(BidiUtils::detectParagraphLevel(word, blockStyle.isRtl ? 1 : 0));
-        const int rubyWidth = renderer.getTextAdvanceX(fontId, rubyTexts[i].c_str(), EpdFontFamily::SUP);
-        const int screenWidth = renderer.getScreenWidth();
-
-        int rubyX = 0;
-        int groupDrawX = 0;
-        if (rubyWidth > groupActualWidth) {
-          rubyX = leaderWordX_shifted - (rubyWidth - groupActualWidth) / 2;
-          if (i == 0) {
-            rubyX = std::max(leaderWordX_shifted, rubyX);
-          }
-          if (rubyX < lastEnd) {
-            rubyX = lastEnd;
-          }
-          groupDrawX = rubyX + (rubyWidth - groupActualWidth) / 2;
-        } else {
-          groupDrawX = leaderWordX_shifted;
-          rubyX = groupDrawX + (groupActualWidth - rubyWidth) / 2;
-          if (i == 0) {
-            rubyX = std::max(leaderWordX_shifted, rubyX);
-          }
-          if (rubyX < lastEnd) {
-            const int push = lastEnd - rubyX;
-            rubyX = lastEnd;
-            groupDrawX += push;
-          }
-        }
-        rubyX = std::max(0, std::min(rubyX, screenWidth - rubyWidth));
-        // Keep groupDrawX aligned if rubyX was clamped by screen edges
-        if (rubyWidth > groupActualWidth) {
-          groupDrawX = rubyX + (rubyWidth - groupActualWidth) / 2;
-        }
-
-        rubies[i] = {rubyX, rubyWidth, rubyTexts[i], baseDir};
-        lastEnd = rubyX + rubyWidth;
-
-        // Propagate shift to all words in the group and subsequent words
-        const int groupShift = groupDrawX - leaderWordX;
-        accumulatedShift = groupShift;
-        for (int k = 0; k < groupWordCount; ++k) {
-          wordShiftArr[i + k] = accumulatedShift;
-        }
+            static_cast<BidiUtils::BidiBaseDir>(BidiUtils::detectParagraphLevel(wordText(i), blockStyle.isRtl ? 1 : 0));
+        rubies[i] = {leaderWordX - (rubyWidth - groupActualWidth) / 2, rubyTexts[i], baseDir};
         i += groupWordCount - 1;
       }
     }
@@ -275,7 +229,7 @@ void TextBlock::render(const GfxRenderer& renderer, const int fontId, const int 
       wordY += ascender / 4;
     }
 
-    const int drawX = wordX + (blockHasRuby ? wordShiftArr[i] : 0);
+    const int drawX = wordX;
 
     if (boundary > 0) {
       // Focus split: draw bold prefix, then the regular suffix at a pre-computed x offset.
@@ -291,19 +245,19 @@ void TextBlock::render(const GfxRenderer& renderer, const int fontId, const int 
           std::min<size_t>({static_cast<size_t>(boundary), static_cast<size_t>(wordTextLen(i)), sizeof(boldBuf) - 1});
       memcpy(boldBuf, word, boldLen);
       boldBuf[boldLen] = '\0';
-      renderer.drawText(fontId, drawX, wordY, boldBuf, true, boldStyle, baseDir);
+      renderer.drawText(fontId, drawX, wordY, boldBuf, true, boldStyle, baseDir, tracking);
       const int suffixX = drawX + focusSuffixXArr[i];
-      renderer.drawText(fontId, suffixX, wordY, word + boldLen, true, currentStyle, baseDir);
+      renderer.drawText(fontId, suffixX, wordY, word + boldLen, true, currentStyle, baseDir, tracking);
     } else {
-      renderer.drawText(fontId, drawX, wordY, word, true, currentStyle, baseDir);
+      renderer.drawText(fontId, drawX, wordY, word, true, currentStyle, baseDir, tracking);
     }
 
     // Horizontal ruby text rendering
     if (blockHasRuby && i < rubyTexts.size() && !rubyTexts[i].empty() &&
         (wordStyle(i) & EpdFontFamily::RUBY_CONTINUE) == 0) {
       const int rubyY = wordY - ascender;
-      renderer.drawText(fontId, rubies[i].x, rubyY, rubies[i].text.c_str(), true, EpdFontFamily::SUP,
-                        rubies[i].baseDir);
+      renderer.drawText(fontId, rubies[i].x, rubyY, rubies[i].text.c_str(), true, EpdFontFamily::SUP, rubies[i].baseDir,
+                        tracking);
     }
 
     if (scanning) {
@@ -312,21 +266,17 @@ void TextBlock::render(const GfxRenderer& renderer, const int fontId, const int 
 
     if (EpdFontFamily::hasTextDecoration(currentStyle)) {
       int lineStartX = drawX;
-      int lineWidth = renderer.getTextWidth(fontId, word, currentStyle, baseDir);
-
-      if ((currentStyle & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0) {
-        lineWidth = (lineWidth + 1) / 2;
-      }
+      int lineWidth = renderer.getTextAdvanceX(fontId, word, currentStyle, tracking, baseDir,
+                                               GfxRenderer::TextMeasureMode::Rendered);
 
       // Do not decorate the synthetic em-space used for paragraph indentation.
       if (wordTextLen(i) >= 3 && static_cast<uint8_t>(word[0]) == 0xE2 && static_cast<uint8_t>(word[1]) == 0x80 &&
           static_cast<uint8_t>(word[2]) == 0x83) {
         const char* visibleText = word + 3;
-        lineStartX += renderer.getTextAdvanceX(fontId, "\xe2\x80\x83", currentStyle);
-        lineWidth = renderer.getTextWidth(fontId, visibleText, currentStyle, baseDir);
-        if ((currentStyle & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0) {
-          lineWidth = (lineWidth + 1) / 2;
-        }
+        lineStartX += renderer.getTextAdvanceX(fontId, "\xe2\x80\x83", currentStyle, tracking, baseDir,
+                                               GfxRenderer::TextMeasureMode::Rendered);
+        lineWidth = renderer.getTextAdvanceX(fontId, visibleText, currentStyle, tracking, baseDir,
+                                             GfxRenderer::TextMeasureMode::Rendered);
       }
 
       for (auto& line : decorationLines) {
@@ -392,6 +342,7 @@ bool TextBlock::serialize(HalFile& file) const {
   serialization::writePod(file, blockStyle.textIndentDefined);
   serialization::writePod(file, blockStyle.isRtl);
   serialization::writePod(file, blockStyle.directionDefined);
+  serialization::writePod(file, blockStyle.characterSpacing);
 
   return true;
 }
@@ -490,6 +441,7 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
   serialization::readPod(file, blockStyle.textIndentDefined);
   serialization::readPod(file, blockStyle.isRtl);
   serialization::readPod(file, blockStyle.directionDefined);
+  serialization::readPod(file, blockStyle.characterSpacing);
 
   return block;
 }

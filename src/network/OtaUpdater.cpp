@@ -6,14 +6,18 @@
 // the local header last and break the build.
 #include "HttpDownloader.h"
 #include <Logging.h>
-#include <ReleaseVersion.h>
+#include <Memory.h>
 #include <ReleaseJsonParser.h>
+#include <ReleaseVersion.h>
 #include <esp_ota_ops.h>
-#include <esp_wifi.h>
 // clang-format on
 
+#include <algorithm>
+#include <cstring>
 #include <string>
 
+#include "FirmwareBoardTag.h"
+#include "FirmwareFlasher.h"
 #include "ForkConfig.h"
 
 OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
@@ -24,12 +28,43 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   // on top of the TLS session's heap during the fetch; with -fno-exceptions an
   // OOM there aborts. fetchUrl handles the verified-https GET, redirects, and
   // User-Agent (see HttpDownloader).
-  ReleaseJsonParser releaseParser(ForkConfig::OTA_FIRMWARE_ASSET);
-  const bool ok =
-      HttpDownloader::fetchUrl(ForkConfig::OTA_LATEST_RELEASE_URL, [&releaseParser](const uint8_t* data, size_t len) {
-        releaseParser.feed(reinterpret_cast<const char*>(data), len);
-        return true;
-      });
+  // Heap-allocated: the parser embeds a 2 KB JSON token buffer.
+  auto releaseParserPtr = makeUniqueNoThrow<ReleaseJsonParser>();
+  if (!releaseParserPtr) {
+    LOG_ERR("OTA", "OOM: release parser");
+    return OOM_ERROR;
+  }
+  ReleaseJsonParser& releaseParser = *releaseParserPtr;
+  releaseParser.setFirmwareAssetName("");
+  // Each board updates from crosspoint-<version>-<device>.bin. The combined
+  // C3 image uses x3-x4; other asset suffixes match their firmware board tag.
+  // The Readwise variant overrides the device so it installs its own asset.
+  char assetSuffix[24] = "-x3-x4";
+#ifdef OTA_ASSET_DEVICE
+  snprintf(assetSuffix, sizeof(assetSuffix), "-%s", OTA_ASSET_DEVICE);
+#else
+  const bool isX4 = board_tag::boardNameLen() == 2 && memcmp(board_tag::boardName(), "x4", 2) == 0;
+  if (!isX4) {
+    snprintf(assetSuffix, sizeof(assetSuffix), "-%.*s", static_cast<int>(board_tag::boardNameLen()),
+             board_tag::boardName());
+  }
+#endif
+  char assetName[48] = {};
+  bool assetNameSet = false;
+  const bool ok = HttpDownloader::fetchUrl(ForkConfig::OTA_LATEST_RELEASE_URL, [&](const uint8_t* data, size_t len) {
+    size_t offset = 0;
+    while (!assetNameSet && offset < len) {
+      releaseParser.feed(reinterpret_cast<const char*>(data + offset), 1);
+      offset++;
+      if (releaseParser.foundTag()) {
+        snprintf(assetName, sizeof(assetName), "crosspoint-%s%s.bin", releaseParser.getTagName(), assetSuffix);
+        releaseParser.setFirmwareAssetName(assetName);
+        assetNameSet = true;
+      }
+    }
+    if (offset < len) releaseParser.feed(reinterpret_cast<const char*>(data + offset), len - offset);
+    return true;
+  });
   if (!ok) {
     LOG_ERR("OTA", "Release check fetch failed");
     return HTTP_ERROR;
@@ -44,7 +79,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   }
 
   if (!releaseParser.foundFirmware()) {
-    LOG_ERR("OTA", "No %s asset found", ForkConfig::OTA_FIRMWARE_ASSET);
+    LOG_INF("OTA", "No %s asset in latest release", assetName);
     return NO_UPDATE;
   }
 
@@ -60,10 +95,13 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
 }
 
 bool OtaUpdater::isUpdateNewer() const {
-  if (!updateAvailable || latestVersion.empty()) {
+  if (!updateAvailable || latestVersion.empty() || latestVersion == CROSSPOINT_VERSION) {
     return false;
   }
 
+  // Semver compare, including prerelease ordering. Build metadata (the
+  // Readwise variant's "+readwise") does not make a build look older than the
+  // release it was cut from.
   return ReleaseVersion::isNewer(latestVersion, CROSSPOINT_VERSION);
 }
 
@@ -92,13 +130,43 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback onProgres
     return INTERNAL_UPDATE_ERROR;
   }
 
-  /* For better timing and connectivity, we disable power saving for WiFi */
-  esp_wifi_set_ps(WIFI_PS_NONE);
-
   processedSize = 0;
   int lastReportedPct = -1;
   bool flashOk = true;
+  // The image streams in chunks; only the first bytes carry the header. Buffer
+  // the first 14 bytes so we can read chip_id (esp_image_header_t offset 12)
+  // and reject a wrong-MCU image before it overwrites the OTA partition.
+  uint8_t hdr[14];
+  size_t hdrLen = 0;
+  bool wrongChip = false;
+  // All S3 boards share a chip_id, so also scan the stream for the embedded
+  // board tag (FirmwareBoardTag.h). An untagged image passes; a tag naming a
+  // different board aborts the download. The wrong image may partially land in
+  // the inactive OTA slot, but esp_ota_abort() below means it never becomes
+  // the boot target.
+  board_tag::Scanner tagScanner;
   const bool fetchOk = HttpDownloader::fetchUrl(otaUrl, [&](const uint8_t* data, size_t len) {
+    if (hdrLen < sizeof(hdr)) {
+      const size_t take = std::min(len, sizeof(hdr) - hdrLen);
+      std::memcpy(hdr + hdrLen, data, take);
+      hdrLen += take;
+      if (hdrLen == sizeof(hdr)) {
+        uint16_t imageChip;
+        std::memcpy(&imageChip, hdr + 12, sizeof(imageChip));
+        const uint16_t deviceChip = firmware_flash::runningPartitionChipId();
+        if (deviceChip != 0xFFFF && imageChip != deviceChip) {
+          LOG_ERR("OTA", "wrong chip: image=0x%04X device=0x%04X", imageChip, deviceChip);
+          wrongChip = true;
+          return false;  // abort the transfer
+        }
+      }
+    }
+    tagScanner.feed(data, len);
+    if (tagScanner.mismatch()) {
+      LOG_ERR("OTA", "wrong board: image=%s device=%.*s", tagScanner.foundName(),
+              static_cast<int>(board_tag::boardNameLen()), board_tag::boardName());
+      return false;  // abort the transfer
+    }
     if (esp_ota_write(otaHandle, data, len) != ESP_OK) {
       flashOk = false;
       return false;  // abort the transfer
@@ -117,8 +185,11 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback onProgres
     return true;
   });
 
-  /* Return back to default power saving for WiFi in case of failing */
-  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+  if (wrongChip || tagScanner.mismatch()) {
+    LOG_ERR("OTA", "Firmware install aborted: wrong device");
+    esp_ota_abort(otaHandle);
+    return WRONG_DEVICE_ERROR;
+  }
 
   if (!fetchOk || !flashOk) {
     LOG_ERR("OTA", "Firmware install failed (%s)", flashOk ? "download" : "flash write");

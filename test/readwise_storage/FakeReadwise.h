@@ -198,6 +198,33 @@ class FakeApi : public readwise::ReadwiseApi {
     return response;
   }
 
+  struct PostedHighlight {
+    std::string text;
+    std::string title;
+    std::string author;
+    std::string sourceUrl;
+  };
+  std::vector<PostedHighlight> highlights;
+  bool failHighlights = false;
+  // The next N pushHighlight calls return rejectStatus and are not stored.
+  // A 4xx must not be retried; NetworkError (failHighlights) still is.
+  int rejectHighlightCount = 0;
+  readwise::ApiStatus rejectStatus = readwise::ApiStatus::Rejected;
+
+  readwise::ApiStatus pushHighlight(const char* text, const char* title, const char* author,
+                                    const char* sourceUrl) override {
+    if (failHighlights) {
+      return readwise::ApiStatus::NetworkError;
+    }
+    if (rejectHighlightCount > 0) {
+      --rejectHighlightCount;
+      return rejectStatus;
+    }
+    highlights.push_back({text != nullptr ? text : "", title != nullptr ? title : "", author != nullptr ? author : "",
+                          sourceUrl != nullptr ? sourceUrl : ""});
+    return readwise::ApiStatus::Ok;
+  }
+
   readwise::ApiStatus pushOp(const readwise::PendingOp& op) override {
     ++pushAttempts;
     if (failPushAt > 0 && pushAttempts == failPushAt) {
@@ -247,6 +274,9 @@ class FakeApi : public readwise::ReadwiseApi {
   }
 
   int pushAttempts = 0;
+
+  const char* detail = "";
+  const char* lastDetail() const override { return detail; }
 };
 
 inline readwise::Document makeDoc(const char* id, readwise::Location location, const char* updatedAt,

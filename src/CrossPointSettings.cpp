@@ -7,12 +7,14 @@
 #include <algorithm>
 #include <cstring>
 #include <iterator>
+#include <limits>
 #include <string>
 
 #include "I18nKeys.h"
 #include "ReaderFontSizes.h"
 #include "SettingsList.h"
 #include "fontIds.h"
+#include "util/ParagraphIndentMigration.h"
 
 namespace {
 
@@ -103,6 +105,12 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   // Language -- managed by LanguageSelectActivity, not in SettingsList.
   // Stored as ISO code string ("EN", "DE", ...) for stability across enum reorders.
   doc["language"] = (language < getLanguageCount()) ? LANGUAGE_CODES[language] : "EN";
+
+  // A uint16_t mask, so it does not fit the uint8_t generic loop. Omitted while
+  // unconfigured, so the default keeps following the UI language.
+  if (keyboardLayouts != 0) {
+    doc["keyboardLayouts"] = keyboardLayouts;
+  }
 }
 
 bool CrossPointSettings::fromJson(JsonVariantConst doc) {
@@ -132,7 +140,13 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
         char obfKey[OBF_KEY_BUF];
         snprintf(obfKey, sizeof(obfKey), "%s_obf", info.key);
         bool ok = false;
-        const std::string decoded = obfuscation::deobfuscateFromBase64(doc[obfKey] | "", &ok);
+        bool tooLong = false;
+        const std::string decoded =
+            obfuscation::deobfuscateFromBase64(doc[obfKey] | "", info.stringMaxLen - 1, &ok, &tooLong);
+        if (tooLong) {
+          LOG_ERR("CPS", "Oversized obfuscated value for key '%s'", info.key);
+          needsResave = true;
+        }
         if (ok && !decoded.empty()) {
           copyToField(destPtr, decoded.c_str(), info.stringMaxLen);
           loaded = true;
@@ -153,7 +167,7 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
       const uint8_t fieldDefault = s.*(info.valuePtr);  // struct-initializer default, read before we overwrite it
       uint8_t v = doc[info.key] | fieldDefault;
       if (info.type == SettingType::ENUM) {
-        v = clamp(v, (uint8_t)info.enumValues.size(), fieldDefault);
+        v = clamp(v, (uint8_t)info.enumLabels().size(), fieldDefault);
       } else if (info.type == SettingType::TOGGLE) {
         v = clamp(v, (uint8_t)2, fieldDefault);
       } else if (info.type == SettingType::VALUE) {
@@ -163,6 +177,27 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
           v = info.valueRange.max;
       }
       s.*(info.valuePtr) = v;
+    }
+  }
+
+  const auto indentSpaces = doc["paragraphIndentSpaces"];
+  const bool hasSavedWidth = indentSpaces.is<int>();
+  const int savedWidth = hasSavedWidth ? indentSpaces.as<int>() : 0;
+  paragraphIndentSpaces = migrateParagraphIndentSpaces(hasSavedWidth, savedWidth, extraParagraphSpacing != 0);
+  if (!hasSavedWidth || savedWidth < 0 || savedWidth > 5) needsResave = true;
+
+  // Older files stored one combined touch mode under "touchReaderControls":
+  // 0=off, 1=tap, 2=swipe, 3=inverted tap. Split it into the master toggle
+  // plus the per-direction gesture pair (the generic loop above already folded
+  // out-of-range toggle values back to the On default).
+  if (doc["pageTurnGesture"].isNull() && doc["previousPageGesture"].isNull() &&
+      doc["touchReaderControls"].is<uint8_t>()) {
+    const uint8_t mode = doc["touchReaderControls"].as<uint8_t>();
+    if (mode >= 1 && mode <= 3) {
+      touchReaderControls = TOUCH_READER_ON;
+      pageTurnGesture = mode == 1 ? TAP_ONLY : mode == 2 ? SWIPE_ONLY : INVERTED_TAP;
+      previousPageGesture = pageTurnGesture;
+      needsResave = true;
     }
   }
 
@@ -195,6 +230,17 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   // Font family — uses dynamic getter/setter in SettingsList so the generic loop skips it.
   const uint8_t storedFontFamily = doc["fontFamily"] | (uint8_t)0;
   fontFamily = clamp(storedFontFamily, BUILTIN_FONT_COUNT, 0);
+  if (BoardConfig::hasHomeKey() && doc["homeButtonLongPressAction"].isNull() &&
+      !doc["longPressMenuFunction"].isNull()) {
+    static constexpr HomeButtonAction LEGACY[] = {HomeButtonAction::Sync, HomeButtonAction::Ignore,
+                                                  HomeButtonAction::Bookmark, HomeButtonAction::Dictionary,
+                                                  HomeButtonAction::ReaderMenu};
+    if (s.longPressMenuFunction < sizeof(LEGACY) / sizeof(LEGACY[0])) {
+      s.homeButtonLongPressAction = static_cast<uint8_t>(LEGACY[s.longPressMenuFunction]);
+      needsResave = true;
+    }
+  }
+
   // SD card font family name — not in SettingsList, load manually
   const char* sfn = doc["sdFontFamilyName"] | "";
   strncpy(sdFontFamilyName, sfn, sizeof(sdFontFamilyName) - 1);
@@ -213,6 +259,11 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   // Language -- stored as code string for stability across enum reorders.
   if (doc["language"].is<const char*>()) {
     language = static_cast<uint8_t>(I18n::languageFromCode(doc["language"].as<const char*>()));
+  }
+
+  // Absent means unconfigured, which is the default.
+  if (doc["keyboardLayouts"].is<uint16_t>()) {
+    keyboardLayouts = doc["keyboardLayouts"].as<uint16_t>();
   }
 
   if (needsResave) {
@@ -234,7 +285,6 @@ CrossPointSettings::StatusBarSpec CrossPointSettings::statusBarSpec() const {
   spec.showBatteryPercent = hideBatteryPercentage == HIDE_NEVER;
   spec.clockMode = statusBarClock;
   spec.clock12h = clockFormat == 1;
-  spec.clockUtcOffsetQ = clockUtcOffsetQ;
   spec.progressBarMode = statusBarProgressBar;
   spec.progressBarHeightPx =
       statusBarProgressBar != HIDE_PROGRESS ? static_cast<uint8_t>((statusBarProgressBarThickness + 1) * 2) : 0;
@@ -247,7 +297,10 @@ ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWid
   ReaderRenderSpec spec;
   spec.fontId = getReaderFontId();
   spec.lineCompression = getReaderLineCompression();
+  spec.characterSpacing = getCharacterSpacing();
+  spec.wordSpacingPercent = wordSpacing;
   spec.extraParagraphSpacing = extraParagraphSpacing != 0;
+  spec.paragraphIndentSpaces = paragraphIndentSpaces;
   spec.paragraphAlignment = paragraphAlignment;
   spec.viewportWidth = viewportWidth;
   spec.viewportHeight = viewportHeight;
@@ -259,7 +312,11 @@ ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWid
 }
 
 float CrossPointSettings::getReaderLineCompression() const {
-  // SD card fonts use same compression as Bookerly (the most neutral values)
+  // SD card and vector fonts get a wider scale than the built-ins: their
+  // faces carry their own (often generous) natural line height, so the old
+  // Bookerly-tuned 1.1/1.2 steps were visually near-indistinguishable. At
+  // 12pt in portrait (~760px viewport) this scale spans ~26/24/19/15 lines
+  // per page — each step reads as a clearly different density.
   if (sdFontFamilyName[0] != '\0') {
     switch (lineSpacing) {
       case TIGHT:
@@ -268,7 +325,9 @@ float CrossPointSettings::getReaderLineCompression() const {
       default:
         return 1.0f;
       case WIDE:
-        return 1.1f;
+        return 1.3f;
+      case EXTRA_WIDE:
+        return 1.6f;
     }
   }
 
@@ -283,6 +342,8 @@ float CrossPointSettings::getReaderLineCompression() const {
           return 1.0f;
         case WIDE:
           return 1.1f;
+        case EXTRA_WIDE:
+          return 1.2f;
       }
     case NOTOSANS:
       switch (lineSpacing) {
@@ -293,6 +354,8 @@ float CrossPointSettings::getReaderLineCompression() const {
           return 0.95f;
         case WIDE:
           return 1.0f;
+        case EXTRA_WIDE:
+          return 1.05f;
       }
   }
 }
@@ -317,6 +380,10 @@ int CrossPointSettings::getRefreshFrequency() const {
       return 15;
     case REFRESH_30:
       return 30;
+    case REFRESH_NEVER:
+      // Effectively disables the periodic full refresh; the page counter
+      // counts down from here and never reaches the threshold in practice.
+      return std::numeric_limits<int>::max();
   }
 }
 

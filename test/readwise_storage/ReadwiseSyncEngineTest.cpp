@@ -124,6 +124,7 @@ TEST(ReadwiseSync, NetworkFailureDuringPullLeavesNoCheckpoint) {
   EXPECT_FALSE(outcome.ok);
   EXPECT_EQ(outcome.failedStage, SyncStage::Pulling);
   EXPECT_EQ(outcome.status, ApiStatus::NetworkError);
+  EXPECT_STREQ(outcome.detail, "pull later");
   EXPECT_FALSE(f.store.has(f.engine.checkpointPath()));
 }
 
@@ -220,6 +221,24 @@ TEST(ReadwiseJournalTest, AcknowledgedOpsRemovedWithoutLosingLaterOnes) {
   EXPECT_STREQ(reloaded.entries()[1].id, "doc3");
 }
 
+struct NotFoundAsk {
+  bool drop = false;
+  int calls = 0;
+  const char* id = "doc2";
+  bool expectTitle = false;
+};
+
+bool answerNotFound(void* ctx, const PendingOp& op, const char* title, const char* detail) {
+  auto* ask = static_cast<NotFoundAsk*>(ctx);
+  ++ask->calls;
+  EXPECT_STREQ(op.id, ask->id);
+  EXPECT_NE(std::string(detail != nullptr ? detail : "").find("HTTP 404"), std::string::npos);
+  if (ask->expectTitle) {
+    EXPECT_STREQ(title, "Title");
+  }
+  return ask->drop;
+}
+
 // A push failure mid-queue must keep the unacknowledged operations, so nothing
 // the user asked for is silently dropped.
 TEST(ReadwiseSync, FailedPushPreservesUnacknowledgedOps) {
@@ -228,16 +247,137 @@ TEST(ReadwiseSync, FailedPushPreservesUnacknowledgedOps) {
   ASSERT_TRUE(f.engine.queueLocationChange("doc2", Location::Archive, kT1));
   ASSERT_TRUE(f.engine.queueLocationChange("doc3", Location::Archive, kT1));
   f.api.failPushAt = 2;
+  f.api.pushStatus = ApiStatus::ServerError;
+  f.api.detail = "HTTP 400 {\"detail\":\"no\"}";
 
   const SyncOutcome outcome = f.engine.sync();
   EXPECT_FALSE(outcome.ok);
   EXPECT_EQ(outcome.failedStage, SyncStage::Pushing);
+  EXPECT_EQ(outcome.status, ApiStatus::ServerError);
   EXPECT_EQ(outcome.pushed, 1);
+  EXPECT_NE(std::string(outcome.detail).find("move archive doc2"), std::string::npos) << outcome.detail;
+  EXPECT_NE(std::string(outcome.detail).find("HTTP 400"), std::string::npos);
 
   ReadwiseJournal reloaded(f.store, f.engine.journalPath());
   ASSERT_TRUE(reloaded.load());
   ASSERT_EQ(reloaded.entries().size(), 2u) << "the acknowledged op is dropped, the rest are kept";
   EXPECT_STREQ(reloaded.entries()[0].id, "doc2");
+}
+
+// A 404 with nobody to ask aborts like any other push failure and keeps the op,
+// so a missing prompt cannot silently throw away a queued archive.
+TEST(ReadwiseSync, NotFoundWithoutHookAbortsAndKeepsTheOp) {
+  Fixture f;
+  ASSERT_TRUE(f.engine.queueLocationChange("doc1", Location::Archive, kT1));
+  ASSERT_TRUE(f.engine.queueLocationChange("doc2", Location::Archive, kT1));
+  f.api.failPushAt = 2;
+  f.api.pushStatus = ApiStatus::NotFound;
+  f.api.detail = "HTTP 404";
+
+  const SyncOutcome outcome = f.engine.sync();
+  EXPECT_FALSE(outcome.ok);
+  EXPECT_EQ(outcome.failedStage, SyncStage::Pushing);
+  EXPECT_EQ(outcome.status, ApiStatus::NotFound);
+  EXPECT_EQ(outcome.pushed, 1);
+  EXPECT_NE(std::string(outcome.detail).find("move archive doc2"), std::string::npos) << outcome.detail;
+  EXPECT_NE(std::string(outcome.detail).find("HTTP 404"), std::string::npos);
+
+  ReadwiseJournal reloaded(f.store, f.engine.journalPath());
+  ASSERT_TRUE(reloaded.load());
+  ASSERT_EQ(reloaded.entries().size(), 1u);
+  EXPECT_STREQ(reloaded.entries()[0].id, "doc2");
+}
+
+// Stop leaves the op queued. The next sync will ask again.
+TEST(ReadwiseSync, NotFoundStopKeepsTheOp) {
+  Fixture f;
+  ASSERT_TRUE(f.engine.queueLocationChange("doc1", Location::Archive, kT1));
+  f.api.failPushAt = 1;
+  f.api.pushStatus = ApiStatus::NotFound;
+  f.api.detail = "HTTP 404";
+
+  NotFoundAsk ask;
+  ask.id = "doc1";
+  ask.drop = false;
+  f.engine.setNotFoundHooks(ReadwiseSyncEngine::NotFoundHooks{&ask, answerNotFound});
+
+  const SyncOutcome outcome = f.engine.sync();
+  EXPECT_FALSE(outcome.ok);
+  EXPECT_EQ(outcome.status, ApiStatus::NotFound);
+  EXPECT_EQ(ask.calls, 1);
+  EXPECT_EQ(outcome.pushed, 0);
+
+  ReadwiseJournal reloaded(f.store, f.engine.journalPath());
+  ASSERT_TRUE(reloaded.load());
+  ASSERT_EQ(reloaded.entries().size(), 1u);
+  EXPECT_STREQ(reloaded.entries()[0].id, "doc1");
+}
+
+// Continue removes the missing document and its queued op, then the rest of
+// the sync still runs. The drop is persisted before the pull, so a later
+// failure does not bring the 404 back on the next run.
+TEST(ReadwiseSync, NotFoundContinueDropsTheOpAndContinues) {
+  Fixture f;
+  // Ids have to be long enough for forgetDocument; short test ids are refused.
+  constexpr const char* missing = "01hzzzzzzzzzzzzzzzzzzzzz01";
+  constexpr const char* kept = "01hzzzzzzzzzzzzzzzzzzzzz02";
+  f.api.pages.push_back(
+      {{makeDoc(missing, Location::Later, kT1, kT1), makeDoc(kept, Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  ASSERT_TRUE(f.engine.queueLocationChange(missing, Location::Archive, kT1));
+  ASSERT_TRUE(f.engine.queueLocationChange(kept, Location::Archive, kT1));
+  f.api.failPushAt = 1;
+  f.api.pushStatus = ApiStatus::NotFound;
+  f.api.detail = "HTTP 404 {\"detail\":\"not found\"}";
+
+  NotFoundAsk ask;
+  ask.id = missing;
+  ask.drop = true;
+  ask.expectTitle = true;
+  f.engine.setNotFoundHooks(ReadwiseSyncEngine::NotFoundHooks{&ask, answerNotFound});
+
+  const SyncOutcome outcome = f.engine.sync();
+  ASSERT_TRUE(outcome.ok) << outcome.detail;
+  EXPECT_EQ(ask.calls, 1);
+  EXPECT_EQ(outcome.pushed, 1);
+  ASSERT_EQ(f.api.pushed.size(), 1u);
+  EXPECT_STREQ(f.api.pushed[0].id, kept);
+
+  ReadwiseJournal reloaded(f.store, f.engine.journalPath());
+  ASSERT_TRUE(reloaded.load());
+  EXPECT_TRUE(reloaded.entries().empty());
+
+  Document gone;
+  EXPECT_FALSE(f.engine.findDocument(missing, gone));
+}
+
+TEST(ReadwiseSync, NotFoundContinueStaysDroppedWhenPullFails) {
+  Fixture f;
+  constexpr const char* missing = "01hzzzzzzzzzzzzzzzzzzzzz01";
+  f.api.pages.push_back({{makeDoc(missing, Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  ASSERT_TRUE(f.engine.queueLocationChange(missing, Location::Archive, kT1));
+  f.api.failPushAt = 1;
+  f.api.pushStatus = ApiStatus::NotFound;
+  f.api.detail = "HTTP 404";
+  f.api.pages.push_back({{}, "", ApiStatus::NetworkError});
+
+  NotFoundAsk ask;
+  ask.id = missing;
+  ask.drop = true;
+  ask.expectTitle = true;
+  f.engine.setNotFoundHooks(ReadwiseSyncEngine::NotFoundHooks{&ask, answerNotFound});
+
+  const SyncOutcome outcome = f.engine.sync();
+  EXPECT_FALSE(outcome.ok);
+  EXPECT_EQ(outcome.failedStage, SyncStage::Pulling);
+  EXPECT_EQ(ask.calls, 1);
+
+  ReadwiseJournal reloaded(f.store, f.engine.journalPath());
+  ASSERT_TRUE(reloaded.load());
+  EXPECT_TRUE(reloaded.entries().empty()) << "the dropped 404 must not be retried next sync";
+  Document gone;
+  EXPECT_FALSE(f.engine.findDocument(missing, gone));
 }
 
 // --- conflicts ------------------------------------------------------------
@@ -277,6 +417,91 @@ TEST(ReadwiseSync, LocallyArchivedDocumentLeavesTheSyncedIndexes) {
   EXPECT_FALSE(f.engine.readIndexPage(Location::Later, 0, 10, page) && !page.empty());
   EXPECT_FALSE(f.engine.readIndexPage(Location::Shortlist, 0, 10, page) && !page.empty());
   EXPECT_FALSE(f.engine.readIndexPage(Location::Feed, 0, 10, page) && !page.empty());
+}
+
+// Archiving the last Later/Shortlist document refills those shelves from the
+// server. The new batch can be older than the checkpoint; Feed keeps the window.
+TEST(ReadwiseSync, EmptyShelfRefillsLaterWithoutRewindingFeed) {
+  Fixture f;
+  constexpr const char* doneId = "01hzzzzzzzzzzzzzzzzzzzzz01";
+  constexpr const char* nextId = "01hzzzzzzzzzzzzzzzzzzzzz02";
+  constexpr const char* older = "2026-07-01T00:00:00.000000+00:00";
+
+  f.api.pages.push_back({{makeDoc(doneId, Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  const size_t queriesAfterFirst = f.api.queries.size();
+
+  ASSERT_TRUE(f.engine.queueLocationChange(doneId, Location::Archive, kT2));
+  f.api.pages.push_back({{makeDoc(nextId, Location::Later, older, older)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_GT(f.api.queries.size(), queriesAfterFirst);
+  const ListQuery& later = f.api.queries[queriesAfterFirst];
+  EXPECT_EQ(later.location, Location::Later);
+  EXPECT_STREQ(later.updatedAfter, "");
+
+  bool sawFeed = false;
+  for (size_t i = queriesAfterFirst; i < f.api.queries.size(); ++i) {
+    if (f.api.queries[i].location != Location::Feed) {
+      continue;
+    }
+    sawFeed = true;
+    EXPECT_STREQ(f.api.queries[i].updatedAfter, kT2);
+  }
+  EXPECT_TRUE(sawFeed);
+
+  std::vector<Document> page;
+  ASSERT_TRUE(f.engine.readIndexPage(Location::Later, 0, 10, page));
+  ASSERT_EQ(page.size(), 1u);
+  EXPECT_STREQ(page[0].id, nextId);
+
+  Checkpoint checkpoint;
+  ASSERT_TRUE(f.engine.loadCheckpoint(checkpoint));
+  EXPECT_STREQ(checkpoint.updatedAfter, kT2) << "a refill must not move the checkpoint backwards";
+}
+
+// A shelf that still has a document stays on the incremental window.
+TEST(ReadwiseSync, PartialShelfDoesNotRefill) {
+  Fixture f;
+  f.api.pages.push_back(
+      {{makeDoc("doc1", Location::Later, kT1, kT1), makeDoc("doc2", Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  const size_t queriesAfterFirst = f.api.queries.size();
+
+  ASSERT_TRUE(f.engine.queueLocationChange("doc1", Location::Archive, kT1));
+  f.api.pages.push_back({{makeDoc("doc2", Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_GT(f.api.queries.size(), queriesAfterFirst);
+  const ListQuery& later = f.api.queries[queriesAfterFirst];
+  EXPECT_EQ(later.location, Location::Later);
+  EXPECT_STREQ(later.updatedAfter, kT2);
+}
+
+// Deleting the last Later document frees the shelf, so the same sync refills it.
+TEST(ReadwiseSync, DeletingTheLastDocumentRefills) {
+  Fixture f;
+  constexpr const char* doneId = "01hzzzzzzzzzzzzzzzzzzzzz11";
+  constexpr const char* nextId = "01hzzzzzzzzzzzzzzzzzzzzz12";
+
+  f.api.pages.push_back({{makeDoc(doneId, Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  const size_t queriesAfterFirst = f.api.queries.size();
+
+  ASSERT_TRUE(f.engine.queueDelete(doneId, kT1));
+  f.api.pages.push_back({{makeDoc(nextId, Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_GT(f.api.queries.size(), queriesAfterFirst);
+  EXPECT_EQ(f.api.queries[queriesAfterFirst].location, Location::Later);
+  EXPECT_STREQ(f.api.queries[queriesAfterFirst].updatedAfter, "");
+
+  std::vector<Document> page;
+  ASSERT_TRUE(f.engine.readIndexPage(Location::Later, 0, 10, page));
+  ASSERT_EQ(page.size(), 1u);
+  EXPECT_STREQ(page[0].id, nextId);
+  Document gone;
+  EXPECT_FALSE(f.engine.findDocument(doneId, gone));
 }
 
 // A body is only useful while the document is readable from the library, so
@@ -350,6 +575,35 @@ TEST(ReadwiseSync, RebuildLocalReflectsQueuedActionsOffline) {
   ReadwiseJournal reloaded(f.store, f.engine.journalPath());
   ASSERT_TRUE(reloaded.load());
   EXPECT_EQ(reloaded.entries().size(), 1u);
+}
+
+// A queued delete leaves the list immediately, same as a queued archive. The
+// record stays until the server accepts, because an incremental pull cannot
+// see the deletion and a failed push must still have a local copy to retry.
+TEST(ReadwiseSync, RebuildLocalHidesQueuedDelete) {
+  Fixture f;
+  constexpr const char* gone = "01hzzzzzzzzzzzzzzzzzzzzz01";
+  constexpr const char* kept = "01hzzzzzzzzzzzzzzzzzzzzz02";
+  f.api.pages.push_back(
+      {{makeDoc(gone, Location::Later, kT1, kT1), makeDoc(kept, Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_TRUE(f.engine.queueDelete(gone, kT1));
+  ASSERT_TRUE(f.engine.rebuildLocal());
+
+  std::vector<Document> page;
+  ASSERT_TRUE(f.engine.readIndexPage(Location::Later, 0, 10, page));
+  ASSERT_EQ(page.size(), 1u) << "the deleted document must leave the list before any sync";
+  EXPECT_STREQ(page[0].id, kept);
+  EXPECT_EQ(f.engine.indexCount(Location::Later), 1u);
+
+  Document stillThere;
+  EXPECT_TRUE(f.engine.findDocument(gone, stillThere));
+
+  ReadwiseJournal reloaded(f.store, f.engine.journalPath());
+  ASSERT_TRUE(reloaded.load());
+  EXPECT_EQ(reloaded.entries().size(), 1u);
+  EXPECT_EQ(reloaded.entries()[0].op, OpType::Delete);
 }
 
 // Ordinary navigation must not rewrite the cache: an empty journal makes
@@ -762,4 +1016,276 @@ TEST(ReadwiseSync, CompletedSweepExpiresMissingDocuments) {
   ASSERT_TRUE(f.engine.readIndexPage(Location::Later, 0, 10, page));
   ASSERT_EQ(page.size(), 1u);
   EXPECT_STREQ(page[0].id, "doc1");
+}
+
+TEST(ReadwiseSync, LibraryCountsGroupCategoryUnreadAndOnDevice) {
+  Fixture f;
+  auto unread = makeDoc("a1", Location::Later, kT1, kT1);
+  auto seen = makeDoc("a2", Location::Later, kT2, kT2);
+  seen.flags = FLAG_SEEN;
+  auto email = makeDoc("e1", Location::Later, kT3, kT3);
+  email.category = Category::Email;
+  f.api.pages.push_back({{unread, seen, email}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  ASSERT_TRUE(f.engine.setBodyCached("a1", true));
+  ASSERT_TRUE(f.engine.queueSeen("e1", kT3));
+
+  // A fresh engine has to reload the journal; the queued seen must still count.
+  ReadwiseSyncEngine again(f.api, f.store, kBase);
+  LibraryCounts counts;
+  ASSERT_TRUE(again.collectLibraryCounts(counts));
+
+  const auto article = static_cast<int>(Category::Article);
+  const auto emailSlot = static_cast<int>(Category::Email);
+  EXPECT_EQ(counts.named[article].total, 2);
+  EXPECT_EQ(counts.named[article].unread, 1);
+  EXPECT_EQ(counts.named[article].onDevice, 1);
+  EXPECT_EQ(counts.named[emailSlot].total, 1);
+  EXPECT_EQ(counts.named[emailSlot].unread, 0);
+  EXPECT_EQ(counts.named[emailSlot].onDevice, 0);
+  EXPECT_EQ(counts.named[static_cast<int>(Category::Rss)].total, 0);
+  EXPECT_EQ(counts.other.total, 0);
+}
+
+TEST(ReadwiseSync, LibraryCountsMissingFile) {
+  Fixture f;
+  LibraryCounts counts;
+  EXPECT_FALSE(f.engine.collectLibraryCounts(counts));
+}
+
+TEST(ReadwiseSync, LengthSlotsSplitLaterAndShortlistByWordCount) {
+  Fixture f;
+  std::vector<uint16_t> slots;
+  ASSERT_TRUE(f.engine.collectLengthSlots(1500, true, nullptr, slots));
+  EXPECT_TRUE(slots.empty());
+
+  auto withWords = [](const char* id, Location location, const char* when, uint32_t words, const char* author) {
+    Document doc = makeDoc(id, location, when, when);
+    doc.wordCount = words;
+    copyBounded(doc.author, AUTHOR_CAP, author, strlen(author));
+    return doc;
+  };
+  f.api.pages.push_back({{
+                             withWords("later-long", Location::Later, kT1, 2000, "Ada"),
+                             withWords("later-quick", Location::Later, kT3, 400, "Ada"),
+                             withWords("later-zero", Location::Later, kT2, 0, "Ada"),
+                             withWords("short-edge", Location::Shortlist, kT2, 1500, "Bea"),
+                             withWords("short-quick", Location::Shortlist, kT1, 1499, "Bea"),
+                             withWords("feed-long", Location::Feed, kT3, 5000, "Ada"),
+                         },
+                         "",
+                         ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_TRUE(f.engine.collectLengthSlots(1500, true, nullptr, slots));
+  std::vector<Document> docs;
+  ASSERT_TRUE(f.engine.readRecords(slots.data(), static_cast<uint16_t>(slots.size()), docs));
+  ASSERT_EQ(docs.size(), 2u);
+  EXPECT_STREQ(docs[0].id, "short-edge");
+  EXPECT_STREQ(docs[1].id, "later-long");
+
+  ASSERT_TRUE(f.engine.collectLengthSlots(1500, false, nullptr, slots));
+  ASSERT_TRUE(f.engine.readRecords(slots.data(), static_cast<uint16_t>(slots.size()), docs));
+  ASSERT_EQ(docs.size(), 2u);
+  EXPECT_STREQ(docs[0].id, "later-quick");
+  EXPECT_STREQ(docs[1].id, "short-quick");
+
+  ASSERT_TRUE(f.engine.collectLengthSlots(1500, true, "Ada", slots));
+  ASSERT_TRUE(f.engine.readRecords(slots.data(), static_cast<uint16_t>(slots.size()), docs));
+  ASSERT_EQ(docs.size(), 1u);
+  EXPECT_STREQ(docs[0].id, "later-long");
+
+  EXPECT_TRUE(f.engine.readRecords(nullptr, 0, docs));
+  EXPECT_TRUE(docs.empty());
+}
+
+TEST(ReadwiseSync, HighlightIsPostedOnceOnSync) {
+  Fixture f;
+  constexpr const char* id = "01hzzzzzzzzzzzzzzzzzzzzz08";
+  f.api.pages.push_back({{makeDoc(id, Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_TRUE(f.engine.appendHighlight(id, "Call me Ishmael"));
+  ASSERT_TRUE(f.engine.appendHighlight(id, "Call me Ishmael"));
+  const SyncOutcome posted = f.engine.sync();
+  ASSERT_TRUE(posted.ok) << "failed at stage " << static_cast<int>(posted.failedStage);
+  ASSERT_EQ(f.api.highlights.size(), 1u);
+  EXPECT_EQ(posted.highlightsSent, 1);
+  EXPECT_EQ(posted.highlightsFailed, 0);
+  EXPECT_EQ(f.api.highlights[0].text, "Call me Ishmael");
+  EXPECT_EQ(f.api.highlights[0].title, "Title");
+  EXPECT_TRUE(f.store.has(std::string(kBase) + "/highlights/" + id + ".bin"));
+  EXPECT_FALSE(f.store.has(std::string(kBase) + "/bodies/" + id + "/highlights.bin"));
+
+  f.api.highlights.clear();
+  ASSERT_TRUE(f.engine.sync().ok);
+  EXPECT_TRUE(f.api.highlights.empty());
+}
+
+TEST(ReadwiseSync, HighlightPushFailureStaysQueued) {
+  Fixture f;
+  constexpr const char* id = "01hzzzzzzzzzzzzzzzzzzzzz08";
+  ASSERT_TRUE(f.engine.appendHighlight(id, "A quote with \"marks\""));
+  f.api.failHighlights = true;
+  const SyncOutcome failed = f.engine.sync();
+  EXPECT_FALSE(failed.ok);
+  EXPECT_EQ(failed.failedStage, SyncStage::Pushing);
+  EXPECT_NE(std::string(failed.detail).find("highlight"), std::string::npos);
+  EXPECT_NE(std::string(failed.detail).find(id), std::string::npos);
+  EXPECT_TRUE(f.api.highlights.empty());
+  EXPECT_EQ(failed.highlightsSent, 0);
+  EXPECT_EQ(failed.highlightsFailed, 0);
+
+  f.api.failHighlights = false;
+  ASSERT_TRUE(f.engine.sync().ok);
+  ASSERT_EQ(f.api.highlights.size(), 1u);
+  EXPECT_EQ(f.api.highlights[0].text, "A quote with \"marks\"");
+  EXPECT_TRUE(f.api.highlights[0].title.empty());
+}
+
+TEST(ReadwiseSync, ArchiveMovesHighlightOutOfTheArticleDir) {
+  Fixture f;
+  constexpr const char* id = "01hzzzzzzzzzzzzzzzzzzzzz08";
+  Document doc = makeDoc(id, Location::Later, kT1, kT1);
+  doc.flags |= FLAG_HAS_BODY;
+  f.api.pages.push_back({{doc}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  const std::string body = f.engine.bodyPath(id);
+  f.store.put(body, {'e', 'p', 'u', 'b'});
+  ASSERT_TRUE(f.engine.appendHighlight(id, "A sentence worth keeping"));
+
+  const std::string kept = std::string(kBase) + "/highlights/" + id + ".bin";
+  const std::string legacy = std::string(kBase) + "/bodies/" + id + "/highlights.bin";
+  const std::vector<uint8_t> bytes = f.store.files().at(kept);
+  f.store.put(legacy, bytes);
+  ASSERT_TRUE(f.store.remove(kept));
+
+  ASSERT_TRUE(f.engine.queueLocationChange(id, Location::Archive, kT1));
+  ASSERT_TRUE(f.engine.rebuildLocal());
+  EXPECT_FALSE(f.store.has(body)) << "the cached article is still evicted";
+  EXPECT_FALSE(f.store.has(legacy));
+  EXPECT_TRUE(f.store.has(kept));
+
+  const SyncOutcome posted = f.engine.sync();
+  ASSERT_TRUE(posted.ok) << posted.detail;
+  EXPECT_EQ(posted.highlightsSent, 1);
+  ASSERT_EQ(f.api.highlights.size(), 1u);
+  EXPECT_EQ(f.api.highlights[0].text, "A sentence worth keeping");
+  EXPECT_EQ(f.api.highlights[0].title, "Title");
+  EXPECT_TRUE(f.store.has(kept));
+}
+
+TEST(ReadwiseSync, ForgetDocumentKeepsUnsentHighlight) {
+  Fixture f;
+  constexpr const char* id = "01hzzzzzzzzzzzzzzzzzzzzz08";
+  f.api.pages.push_back({{makeDoc(id, Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  ASSERT_TRUE(f.engine.appendHighlight(id, "Still queued"));
+
+  const std::string kept = std::string(kBase) + "/highlights/" + id + ".bin";
+  ASSERT_TRUE(f.engine.forgetDocument(id));
+  EXPECT_TRUE(f.store.has(kept));
+  Document gone;
+  EXPECT_FALSE(f.engine.findDocument(id, gone));
+
+  const SyncOutcome posted = f.engine.sync();
+  ASSERT_TRUE(posted.ok) << posted.detail;
+  EXPECT_EQ(posted.highlightsSent, 1);
+  ASSERT_EQ(f.api.highlights.size(), 1u);
+  EXPECT_EQ(f.api.highlights[0].text, "Still queued");
+  EXPECT_EQ(f.api.highlights[0].title, "Title");
+}
+
+TEST(ReadwiseSync, LegacyHighlightIsMigratedWhenPushed) {
+  Fixture f;
+  constexpr const char* id = "01hzzzzzzzzzzzzzzzzzzzzz08";
+  ASSERT_TRUE(f.engine.appendHighlight(id, "From an older build"));
+  const std::string kept = std::string(kBase) + "/highlights/" + id + ".bin";
+  const std::string legacy = std::string(kBase) + "/bodies/" + id + "/highlights.bin";
+  const std::vector<uint8_t> bytes = f.store.files().at(kept);
+  f.store.put(legacy, bytes);
+  ASSERT_TRUE(f.store.remove(kept));
+
+  const SyncOutcome posted = f.engine.sync();
+  ASSERT_TRUE(posted.ok) << posted.detail;
+  EXPECT_EQ(posted.highlightsSent, 1);
+  EXPECT_TRUE(f.store.has(kept));
+  EXPECT_FALSE(f.store.has(legacy));
+  ASSERT_EQ(f.api.highlights.size(), 1u);
+  EXPECT_EQ(f.api.highlights[0].text, "From an older build");
+}
+
+TEST(ReadwiseSync, RejectedHighlightIsSkippedAndDoesNotBlockSync) {
+  Fixture f;
+  constexpr const char* id = "01hzzzzzzzzzzzzzzzzzzzzz08";
+  f.api.pages.push_back({{makeDoc(id, Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  ASSERT_TRUE(f.engine.appendHighlight(id, "Bad quote"));
+  ASSERT_TRUE(f.engine.appendHighlight(id, "Good quote"));
+  ASSERT_TRUE(f.engine.queueSeen(id, kT1));
+  f.api.rejectHighlightCount = 1;
+  f.api.detail = "HTTP 400 {\"detail\":\"bad highlight\"}";
+
+  const SyncOutcome outcome = f.engine.sync();
+  ASSERT_TRUE(outcome.ok) << outcome.detail;
+  EXPECT_EQ(outcome.highlightsSent, 1);
+  EXPECT_EQ(outcome.highlightsFailed, 1);
+  EXPECT_NE(std::string(outcome.highlightDetail).find("HTTP 400"), std::string::npos);
+  EXPECT_NE(std::string(outcome.highlightDetail).find(id), std::string::npos);
+  ASSERT_EQ(f.api.highlights.size(), 1u);
+  EXPECT_EQ(f.api.highlights[0].text, "Good quote");
+  ASSERT_EQ(f.api.pushed.size(), 1u);
+  EXPECT_EQ(f.api.pushed[0].op, OpType::SetSeen);
+
+  f.api.highlights.clear();
+  f.api.detail = "";
+  const SyncOutcome again = f.engine.sync();
+  ASSERT_TRUE(again.ok);
+  EXPECT_EQ(again.highlightsSent, 0);
+  EXPECT_EQ(again.highlightsFailed, 0);
+  EXPECT_TRUE(f.api.highlights.empty());
+  EXPECT_TRUE(f.store.has(std::string(kBase) + "/highlights/" + id + ".bin"));
+}
+
+TEST(ReadwiseSync, QueuedListShowsArchiveAndDeleteAndUndo) {
+  Fixture f;
+  constexpr const char* archived = "01hzzzzzzzzzzzzzzzzzzzzz21";
+  constexpr const char* deleted = "01hzzzzzzzzzzzzzzzzzzzzz22";
+  constexpr const char* unknown = "01hzzzzzzzzzzzzzzzzzzzzz23";
+  f.api.pages.push_back(
+      {{makeDoc(archived, Location::Later, kT1, kT1), makeDoc(deleted, Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  ASSERT_TRUE(f.engine.queueLocationChange(archived, Location::Archive, kT1));
+  ASSERT_TRUE(f.engine.queueDelete(deleted, kT1));
+  ASSERT_TRUE(f.engine.queueDelete(unknown, kT1));
+  ASSERT_TRUE(f.engine.queueSeen(archived, kT1));
+
+  std::vector<ReadwiseSyncEngine::QueuedDocument> rows;
+  ASSERT_TRUE(f.engine.collectQueued(rows));
+  ASSERT_EQ(rows.size(), 3u);
+  EXPECT_STREQ(rows[0].id, archived);
+  EXPECT_FALSE(rows[0].deleted);
+  EXPECT_STREQ(rows[0].title, "Title");
+  EXPECT_STREQ(rows[1].id, deleted);
+  EXPECT_TRUE(rows[1].deleted);
+  EXPECT_STREQ(rows[2].id, unknown);
+  EXPECT_TRUE(rows[2].deleted);
+  EXPECT_STREQ(rows[2].title, unknown);
+
+  ASSERT_TRUE(f.engine.undoQueued(archived));
+  ASSERT_TRUE(f.engine.rebuildLocal());
+  ASSERT_TRUE(f.engine.collectQueued(rows));
+  ASSERT_EQ(rows.size(), 2u);
+
+  std::vector<Document> page;
+  ASSERT_TRUE(f.engine.readIndexPage(Location::Later, 0, 10, page));
+  bool back = false;
+  for (const Document& doc : page) {
+    if (strcmp(doc.id, archived) == 0) {
+      back = true;
+    }
+  }
+  EXPECT_TRUE(back);
+  EXPECT_FALSE(f.engine.undoQueued("short"));
 }

@@ -254,7 +254,7 @@ Neither a list page nor an article body may be held in memory. Both must be cons
 
 ### The 512-byte parser ceiling
 
-[lib/JsonParser/StreamingJsonParser.h](../lib/JsonParser/StreamingJsonParser.h) has `TOKEN_BUF_SIZE = 512`. On overflow it sets an internal flag and **suppresses the value callback entirely** ([StreamingJsonParser.cpp:242](../lib/JsonParser/StreamingJsonParser.cpp)) — it does not truncate and does not raise an error. The consumer sees the key and then the next event, with no indication that a value went missing.
+[lib/JsonParser/ChunkedJsonParser.h](../lib/JsonParser/ChunkedJsonParser.h) has `TOKEN_BUF_SIZE = 512`. On overflow of a non-streamed value it sets an internal flag and **suppresses the value callback entirely** — it does not truncate and does not raise an error. The consumer sees the key and then the next event, with no indication that a value went missing. Readwise list parsing uses the chunked string sink so `html_content` is not subject to that ceiling. Upstream's SDK parser is a separate type and is not used here.
 
 Against real Reader data this silently discards:
 

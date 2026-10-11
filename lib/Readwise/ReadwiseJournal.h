@@ -8,10 +8,11 @@
 
 // The append-safe pending-action journal.
 //
-// Only operations the API demonstrably honours are ever queued: SetLocation and
-// SetSeen. Phase 1 verified that PATCH /update/ answers 200 for
+// Only operations the API demonstrably honours are ever queued: SetLocation,
+// SetSeen, and Delete. Phase 1 verified that PATCH /update/ answers 200 for
 // reading_progress and silently discards it, so reading position is local-only
-// state and never enters this queue.
+// state and never enters this queue. A document note is a local file, not an
+// entry here: the fixed record has no room for the text.
 
 namespace readwise {
 
@@ -37,6 +38,10 @@ class ReadwiseJournal {
   // atomically. Used after a push is acknowledged; entries queued later must
   // survive, which is why this is a filtered rewrite rather than a truncation.
   bool removeAcknowledged(const std::vector<uint32_t>& seqs);
+
+  // Drops a pending delete and a pending move to Archive for this document.
+  // Seen and other location changes stay. Persists when an entry was removed.
+  bool dropQueuedDocument(const char* id);
 
   const std::vector<PendingOp>& entries() const { return entries_; }
   bool empty() const { return entries_.empty(); }
